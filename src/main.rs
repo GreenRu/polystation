@@ -4737,6 +4737,9 @@ impl App {
                 }
             }
             win32::CMD_UNINSTALL => {
+                if !self.confirm_discard() {
+                    return false; // unsaved changes: the user cancelled
+                }
                 let setup = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("polystation-setup.exe")));
                 match setup.filter(|s| s.is_file()) {
                     Some(s) => {

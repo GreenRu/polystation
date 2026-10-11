@@ -14,7 +14,13 @@ Website: <https://greenru.github.io/polystation/>
 Download **`polystation-setup.exe`** from the [latest release](https://github.com/GreenRu/polystation/releases/latest)
 and run it. It downloads the newest `polystation.exe` from this repository's releases, installs it for the
 current user, adds a Start menu entry and registers `.polystation` project files. Run the installer again (or
-use *Help > Check for Updates*) to update. `polystation-setup.exe --uninstall` removes it.
+use *Help > Check for Updates*) to update.
+
+## Uninstall
+
+Start menu > *Uninstall Polystation*, the *Uninstall* button of the installer, *Help > Uninstall Polystation* in the editor, or
+Windows Settings > Apps. It offers to delete settings and caches too (your projects are never touched).
+`polystation-setup.exe --uninstall --purge` does it all from a command line.
 
 ## Use
 

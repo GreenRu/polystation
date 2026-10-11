@@ -63,6 +63,7 @@
   pre { background: var(--panel); border: 2px solid var(--line); padding: 14px; overflow-x: auto; margin: 0 0 14px; }
   code { color: var(--text); }
   ol, ul { padding-left: 22px; }
+  h3 { margin: 24px 0 8px; font-size: 17px; }
   li { margin-bottom: 6px; }
   footer { padding: 32px 0 56px; color: var(--dim); font-size: 14px; }
   .tag { display: inline-block; background: var(--green); color: #fff; padding: 0 8px; font-size: 13px; font-weight: bold; }
@@ -135,7 +136,15 @@
       <li>Run the installer again, or use <b>Help &gt; Check for Updates</b>, to update.</li>
     </ol>
     <p>Windows may show a SmartScreen warning because the installer is not code&#8209;signed. Choose <b>More info &gt; Run anyway</b>.</p>
-    <p>To remove it completely, use <b>Help &gt; Uninstall Polystation</b>, or:</p>
+    <h3>Remove it from your computer</h3>
+    <p>Any one of these works:</p>
+    <ul>
+      <li><b>Start menu &gt; Uninstall Polystation</b></li>
+      <li>Run the installer again and press <b>Uninstall</b></li>
+      <li><b>Help &gt; Uninstall Polystation</b> inside the editor</li>
+      <li><b>Windows Settings &gt; Apps</b>, find Polystation</li>
+    </ul>
+    <p>It asks whether to also delete Polystation&#8217;s settings, recent projects list and cached files. Your own projects are never touched. From a command line, to remove everything it stored:</p>
     <pre><code>polystation-setup.exe --uninstall --purge</code></pre>
     <p>Prefer no installer? Download <a href="https://github.com/GreenRu/polystation/releases/latest/download/polystation.exe">polystation.exe</a> and run it from anywhere.</p>
   </div>

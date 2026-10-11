@@ -148,13 +148,18 @@ fn powershell(script: &str) -> bool {
     run_hidden("powershell.exe", &["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
 }
 
+/// The Start menu entry that removes Polystation.
+fn uninstall_lnk() -> PathBuf {
+    start_menu().with_file_name(format!("Uninstall {APP}.lnk"))
+}
+
 fn start_menu() -> PathBuf {
     std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_default().join("Microsoft").join("Windows").join("Start Menu").join("Programs").join(format!("{APP}.lnk"))
 }
 
-fn shortcut(lnk: &str, target: &Path, dir: &Path) -> bool {
+fn shortcut(lnk: &str, target: &Path, dir: &Path, args: &str) -> bool {
     powershell(&format!(
-        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut({lnk}); $s.TargetPath='{t}'; $s.WorkingDirectory='{d}'; $s.IconLocation='{t},0'; $s.Description='Polystation: a PS1-style 3D engine'; $s.Save()",
+        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut({lnk}); $s.TargetPath='{t}'; $s.WorkingDirectory='{d}'; $s.Arguments='{args}'; $s.IconLocation='{t},0'; $s.Description='Polystation: a PS1-style 3D engine'; $s.Save()",
         t = target.display().to_string().replace('\'', "''"),
         d = dir.display().to_string().replace('\'', "''"),
     ))
@@ -197,9 +202,10 @@ fn install(rel: &Release, opt: &Options, status: &mut dyn FnMut(&str, f32)) -> R
     if let Some(p) = lnk.parent() {
         let _ = std::fs::create_dir_all(p);
     }
-    shortcut(&format!("'{}'", lnk.display()), &exe, &opt.dir);
+    shortcut(&format!("'{}'", lnk.display()), &exe, &opt.dir, "");
+    shortcut(&format!("'{}'", uninstall_lnk().display()), &setup, &opt.dir, "--uninstall");
     if opt.desktop {
-        shortcut(&format!("([Environment]::GetFolderPath('Desktop') + '\\{APP}.lnk')"), &exe, &opt.dir);
+        shortcut(&format!("([Environment]::GetFolderPath('Desktop') + '\\{APP}.lnk')"), &exe, &opt.dir, "");
     }
     status("Registering .polystation files...", 0.95);
     register(&exe, &setup, &opt.dir, &rel.version);
@@ -251,6 +257,7 @@ fn purge() {
 
 fn uninstall(dir: &Path) {
     let _ = std::fs::remove_file(start_menu());
+    let _ = std::fs::remove_file(uninstall_lnk());
     powershell(&format!("Remove-Item -ErrorAction SilentlyContinue ([Environment]::GetFolderPath('Desktop') + '\\{APP}.lnk')"));
     for key in ["HKCU\\Software\\Classes\\.polystation", "HKCU\\Software\\Classes\\Polystation.Project", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Polystation"] {
         run_hidden("reg.exe", &["delete", key, "/f"]);
@@ -528,6 +535,9 @@ unsafe fn paint(hwnd: isize) {
                 text(dc, f_body, "Create a desktop shortcut", cx + px(28.0), px(282.0), cw, px(24.0), 0xe4e6eb, DT_LEFT | DT_VCENTER | DT_SINGLE);
                 buttons.push((1, [w - px(36.0) - px(150.0), h - px(64.0), px(150.0), px(40.0)]));
                 buttons.push((2, [w - px(36.0) - px(150.0) - px(110.0), h - px(64.0), px(100.0), px(40.0)]));
+                if updating {
+                    buttons.push((6, [px(36.0), h - px(64.0), px(130.0), px(40.0)])); // remove it from this computer
+                }
             }
             Stage::Installing => {
                 text(dc, f_bold, if updating { "Updating Polystation" } else { "Installing Polystation" }, cx, px(150.0), cw, px(26.0), 0xe4e6eb, DT_LEFT | DT_SINGLE);
@@ -567,6 +577,7 @@ unsafe fn paint(hwnd: isize) {
             fill(dc, b[0], b[1] + b[3] - 1, b[2], 1, if primary { 0x2a5bb8 } else { 0x1d1e23 });
             let label = match id {
                 1 => "Install",
+                6 => "Uninstall",
                 2 | 4 => if matches!(stage, Stage::Done) { "Close" } else { "Cancel" },
                 3 => "Launch Polystation",
                 _ => "Try again",
@@ -685,6 +696,15 @@ fn click(hwnd: isize, id: usize) {
         3 => {
             if let Some(exe) = shared.lock().ok().and_then(|s| s.exe.clone()) {
                 let _ = std::process::Command::new(exe).spawn();
+            }
+            unsafe {
+                DestroyWindow(hwnd);
+            }
+        }
+        6 => {
+            // the uninstaller asks what to remove, in a window of its own
+            if let Ok(me) = std::env::current_exe() {
+                let _ = std::process::Command::new(me).arg("--uninstall").spawn();
             }
             unsafe {
                 DestroyWindow(hwnd);
