@@ -3824,6 +3824,17 @@ impl App {
             win32::CMD_SCREENSHOT => self.shot = self.window.file_dialog(true, &BMP_FILTER, "bmp", "screenshot.bmp"),
             win32::CMD_EXIT => return true,
             win32::CMD_SETTINGS => self.open_settings(),
+            win32::CMD_UNINSTALL => {
+                let setup = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("polystation-setup.exe")));
+                match setup.filter(|s| s.is_file()) {
+                    Some(s) => {
+                        if std::process::Command::new(s).arg("--uninstall").spawn().is_ok() {
+                            return true; // close so the files can be removed
+                        }
+                    }
+                    None => self.window.message("Polystation was not installed with its installer, so there is nothing to uninstall.\n\nTo remove an installed copy, use Windows Settings > Apps, or run polystation-setup.exe --uninstall."),
+                }
+            }
             win32::CMD_UPDATE => {
                 // the installer that came with this copy fetches the newest release
                 let setup = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("polystation-setup.exe")));

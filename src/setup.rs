@@ -231,6 +231,23 @@ fn register(exe: &Path, setup: &Path, dir: &Path, version: &str) {
     reg(&[key, "/v", "NoRepair", "/t", "REG_DWORD", "/d", "1"]);
 }
 
+/// Everything Polystation leaves outside its own folder: settings, the recent list, cached files of
+/// compiled games and the Blender conversion cache. Projects are never touched.
+fn purge() {
+    if let Some(a) = std::env::var_os("APPDATA") {
+        let _ = std::fs::remove_dir_all(PathBuf::from(a).join(APP));
+    }
+    let tmp = std::env::temp_dir();
+    let _ = std::fs::remove_dir_all(tmp.join("gpurender_blend"));
+    if let Ok(rd) = std::fs::read_dir(&tmp) {
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().starts_with("polystation_game_") {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+}
+
 fn uninstall(dir: &Path) {
     let _ = std::fs::remove_file(start_menu());
     powershell(&format!("Remove-Item -ErrorAction SilentlyContinue ([Environment]::GetFolderPath('Desktop') + '\\{APP}.lnk')"));
@@ -734,9 +751,17 @@ fn main() {
         }
     }
     if args.iter().any(|a| a == "--uninstall") {
-        if message("Remove Polystation from this computer?\n\nYour projects are not touched.", 0x24) == 6 {
+        let silent = args.iter().any(|a| a == "--silent");
+        let ask = |text: &str| silent || message(text, 0x24) == 6;
+        if ask("Remove Polystation from this computer?\n\nYour projects are never touched.") {
+            let everything = args.iter().any(|a| a == "--purge") || ask("Also delete Polystation's settings, recent-projects list and cached files?\n\nChoose Yes to remove everything it ever stored.");
             uninstall(&opt.dir);
-            message("Polystation was removed.", 0x40);
+            if everything {
+                purge();
+            }
+            if !silent {
+                message(if everything { "Polystation and everything it stored was removed." } else { "Polystation was removed. Its settings were kept." }, 0x40);
+            }
         }
         return;
     }

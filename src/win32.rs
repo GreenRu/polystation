@@ -277,6 +277,7 @@ pub const CMD_GUI_EDITOR: u16 = 1009;
 pub const CMD_NEW_PROJECT: u16 = 1011;
 pub const CMD_START_PAGE: u16 = 1012;
 pub const CMD_UPDATE: u16 = 1013;
+pub const CMD_UNINSTALL: u16 = 1014;
 pub const CMD_SCREENSHOT: u16 = 1006;
 pub const CMD_RESET_CAMERA: u16 = 1010;
 pub const CMD_UNDO: u16 = 1020;
@@ -738,7 +739,7 @@ impl Window {
                 (CMD_RESET_CAMERA, "&Reset Camera"),
             ]);
             let run = popup(&[(CMD_PLAY, "&Play\tF5")]);
-            let mut help = vec![MenuItem::new(CMD_HELP_GUIDE, "Scripting Guide"), MenuItem::new(CMD_UPDATE, "Check for Updates..."), MenuItem::sep()];
+            let mut help = vec![MenuItem::new(CMD_HELP_GUIDE, "Scripting Guide"), MenuItem::new(CMD_UPDATE, "Check for Updates..."), MenuItem::new(CMD_UNINSTALL, "Uninstall Polystation..."), MenuItem::sep()];
             help.push(MenuItem::submenu(
                 "Example Scripts",
                 crate::guide::EXAMPLES.iter().enumerate().map(|(i, (title, _))| MenuItem::new(CMD_EXAMPLE_BASE + i as u16, title)).collect(),
