@@ -144,6 +144,8 @@ unsafe extern "system" {
     fn GetAsyncKeyState(vk: i32) -> i16;
     fn GetCursorPos(p: *mut POINT) -> i32;
     fn SetCursorPos(x: i32, y: i32) -> i32;
+    fn ClipCursor(r: *const RECT) -> i32;
+    fn GetForegroundWindow() -> HWND;
     fn ShowCursor(show: i32) -> i32;
     fn ScreenToClient(h: HWND, p: *mut POINT) -> i32;
     fn ClientToScreen(h: HWND, p: *mut POINT) -> i32;
@@ -203,6 +205,9 @@ pub struct Input {
     pub tree_dbl_click: bool,
     /// Double-click on an item of the file explorer (one-shot).
     pub explorer_dbl_click: bool,
+    /// A hierarchy row / file explorer row was clicked (one-shot).
+    pub tree_click: bool,
+    pub explorer_click: bool,
     /// Right click on the hierarchy / the file list (one-shot): window position; the item under it is selected.
     pub tree_rclick: Option<(i32, i32)>,
     pub explorer_rclick: Option<(i32, i32)>,
@@ -233,6 +238,11 @@ thread_local! {
     /// System DPI / 96: layout metrics are in 96-dpi units and scaled by this.
     static SCALE: Cell<f32> = Cell::new(1.0);
     static CURSOR: Cell<Cursor> = const { Cell::new(Cursor::Arrow) };
+    /// The pointer shape a script chose while playing (a Windows cursor id; 0 = the default) and whether it is hidden.
+    static GAME_SHAPE: Cell<usize> = const { Cell::new(0) };
+    static GAME_HIDDEN: Cell<bool> = const { Cell::new(false) };
+    /// A script asked for the pointer to stay inside the game view.
+    static CLIP_ON: Cell<bool> = const { Cell::new(false) };
     static TRACKING: Cell<bool> = const { Cell::new(false) };
     static HIGH_SURROGATE: Cell<u16> = const { Cell::new(0) };
     static LAST_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
@@ -278,6 +288,41 @@ pub const CMD_NEW_PROJECT: u16 = 1011;
 pub const CMD_START_PAGE: u16 = 1012;
 pub const CMD_UPDATE: u16 = 1013;
 pub const CMD_UNINSTALL: u16 = 1014;
+pub const CMD_GAME_CAMERA: u16 = 1015;
+/// Material panel (shown when a material of the hierarchy is selected).
+pub const CMD_MAT_COLOR: u16 = 1220;
+pub const CMD_MAT_CLEAR_COLOR: u16 = 1221;
+pub const CMD_MAT_TEXTURE: u16 = 1222;
+pub const CMD_MAT_CLEAR_TEXTURE: u16 = 1223;
+pub const CMD_MAT_RESET: u16 = 1224;
+/// Texture mode n of the selected material: 1230 + n. Camera view n (0 = none): 1240 + n.
+pub const CMD_MATMODE_BASE: u16 = 1230;
+pub const CMD_MATCAM_BASE: u16 = 1240;
+pub const ED_MATALPHA: u16 = 3026;
+pub const CB_MATMODE: u16 = 3033;
+pub const CB_MATCAM: u16 = 3034;
+/// The material of the selected object (a combo box in the object panel).
+pub const CB_OBJMAT: u16 = 3035;
+pub const CMD_OBJ_MAT_EDIT: u16 = 1250;
+pub const CMD_MAT_NEW: u16 = 1251;
+pub const CMD_MAT_DUP: u16 = 1252;
+pub const CMD_MAT_DELETE: u16 = 1253;
+pub const CMD_MAT_ASSIGN: u16 = 1254;
+pub const CMD_MAT_BACK: u16 = 1255;
+pub const CMD_MAT_NOFOG: u16 = 1256;
+pub const ED_MATNAME: u16 = 3160;
+pub const ED_MATBRIGHT: u16 = 3161;
+pub const ED_MATGLOW: u16 = 3162;
+pub const ED_MATCUT: u16 = 3163;
+pub const ED_MATROT: u16 = 3164;
+pub const ED_MATTILE0: u16 = 3165;
+pub const ED_MATTILE1: u16 = 3166;
+pub const ED_MATOFF0: u16 = 3167;
+pub const ED_MATOFF1: u16 = 3168;
+pub const ED_MATSCR0: u16 = 3169;
+pub const ED_MATSCR1: u16 = 3170;
+pub const ST_CAMINFO: u16 = 3171;
+pub const ST_MATINFO: u16 = 3137;
 pub const CMD_SCREENSHOT: u16 = 1006;
 pub const CMD_RESET_CAMERA: u16 = 1010;
 pub const CMD_UNDO: u16 = 1020;
@@ -406,6 +451,7 @@ pub const ED_AMBIENT: u16 = 3025;
 pub const CMD_LIGHT_COLOR_BASE: u16 = 1200;
 pub const CB_FOG: u16 = 3030;
 pub const CB_SKY: u16 = 3031;
+pub const CB_COLORBITS: u16 = 3032;
 pub const ST_ENV_INFO: u16 = 3101;
 
 // ---- terrain panel ids ------------------------------------------------------------------------
@@ -442,6 +488,12 @@ pub(crate) fn drag_spec(id: u16) -> Option<(f32, f32, f32, bool, bool)> {
         ED_STEPS => (0.05, 2.0, 32.0, true, false),
         ED_RENDER_DIST => (0.1, 0.0, 1.0e7, false, true),
         ED_AMBIENT => (0.01, 0.0, 8.0, false, false),
+        ED_MATALPHA | ED_MATGLOW | ED_MATCUT => (0.004, 0.0, 1.0, false, false),
+        ED_MATBRIGHT => (0.01, 0.0, 8.0, false, false),
+        ED_MATROT => (0.5, -3600.0, 3600.0, false, false),
+        ED_MATTILE0 | ED_MATTILE1 => (0.02, 0.01, 256.0, false, false),
+        ED_MATOFF0 | ED_MATOFF1 => (0.005, -256.0, 256.0, false, false),
+        ED_MATSCR0 | ED_MATSCR1 => (0.005, -32.0, 32.0, false, false),
         ED_TERRAIN_RES => (0.5, 2.0, 256.0, true, false),
         ED_TERRAIN_DIST => (0.05, 1.0, 12.0, true, false),
         x if (ED_PVEL0..ED_PVEL0 + 3).contains(&x) => (0.01, -10_000.0, 10_000.0, false, true),
@@ -493,6 +545,7 @@ pub fn add_menu_items() -> Vec<MenuItem> {
         item(Prim::Particles),
         item(Prim::Player),
         item(Prim::Light),
+        item(Prim::Camera),
         MenuItem::sep(),
         MenuItem::submenu("Gameplay", crate::prefabs::PREFABS.iter().enumerate().map(|(i, p)| MenuItem::new(CMD_PREFAB_BASE + i as u16, p.name)).collect()),
     ]
@@ -595,6 +648,14 @@ unsafe extern "system" fn main_proc(h: HWND, m: u32, w: usize, l: isize) -> isiz
             unsafe { ReleaseCapture() };
         }
         WM_SETCURSOR if (l & 0xFFFF) == 1 && !LOOKING.get() => {
+            if PLAYING.get() && GAME_HIDDEN.get() {
+                unsafe { SetCursor(0) };
+                return 1;
+            }
+            if PLAYING.get() && GAME_SHAPE.get() != 0 {
+                unsafe { SetCursor(LoadCursorW(0, GAME_SHAPE.get())) };
+                return 1;
+            }
             let id = match CURSOR.get() {
                 Cursor::Arrow => 32512,
                 Cursor::IBeam => 32513,
@@ -814,6 +875,7 @@ impl Window {
                 }
             }
             ctl("BUTTON", "Reset Transform", BTN, CMD_RESET_XFORM, 8, 266, 140, 24);
+            group.set(15); // the rest of the object details (a camera has no appearance, material or collision)
             ctl("STATIC", "APPEARANCE", 0, ST_SECTION, 8, 306, 288, 16);
             ctl("STATIC", "Alpha", 0, 0, 8, 330, 62, 18);
             ctl("EDIT", "", EDIT, ED_ALPHA, 72, 326, 68, 22);
@@ -828,10 +890,73 @@ impl Window {
             group.set(0);
 
             // how the player meets the object (part of the object details)
-            group.set(1);
+            group.set(15);
             ctl("STATIC", "COLLISION", 0, ST_SECTION, 8, 480, 288, 16);
             ctl("COMBOBOX", "", COMBO, CB_COLLISION, 8, 502, 200, 150);
+            ctl("STATIC", "MATERIAL", 0, ST_SECTION, 8, 612, 288, 16);
+            ctl("COMBOBOX", "", COMBO, CB_OBJMAT, 8, 636, 196, 150);
+            ctl("BUTTON", "Edit...", BTN, CMD_OBJ_MAT_EDIT, 208, 634, 86, 24);
             ctl("STATIC", "Solid blocks the player. Passable can be walked through. Trigger is passable and runs on touch / on leave. Water is a pool: the player wades and swims, and the surface ripples.", 0, ST_COLLISION_HINT, 8, 532, 288, 70);
+            // Camera settings (shown below the name and transform of a Camera object)
+            group.set(14);
+            dy.set(0);
+            ctl("STATIC", "CAMERA", 0, ST_SECTION, 8, 306, 288, 16);
+            ctl("STATIC", "", 0, ST_CAMINFO, 8, 330, 288, 54);
+            ctl("BUTTON", "Set as Scene Camera", BTN, CMD_GAME_CAMERA, 8, 390, 288, 28);
+            ctl("BUTTON", "Frame", BTN, CMD_FRAME_SEL, 8, 428, 94, 24);
+            ctl("BUTTON", "Duplicate", BTN, CMD_DUPLICATE, 106, 428, 94, 24);
+            ctl("BUTTON", "Delete", BTN, CMD_DELETE, 204, 428, 92, 24);
+            ctl("STATIC", "The scene camera is what the game looks through when it starts (the player's own eyes when none is set). A camera has no color, texture or collision. To show what a camera sees on a surface, pick it as the Camera of a material.", 0, 0, 8, 464, 288, 100);
+            // Material settings (shown instead of the object details when a material is selected)
+            group.set(13);
+            dy.set(0);
+            ctl("STATIC", "MATERIAL", 0, ST_SECTION, 8, 8, 288, 16);
+            ctl("STATIC", "Name", 0, 0, 8, 34, 46, 18);
+            ctl("EDIT", "", EDIT, ED_MATNAME, 58, 30, 236, 22);
+            ctl("STATIC", "", 0, ST_MATINFO, 8, 58, 288, 56);
+            ctl("BUTTON", "Color...", BTN, CMD_MAT_COLOR, 8, 118, 94, 24);
+            ctl("BUTTON", "Clear Color", BTN, CMD_MAT_CLEAR_COLOR, 106, 118, 94, 24);
+            ctl("BUTTON", "Texture...", BTN, CMD_MAT_TEXTURE, 204, 118, 92, 24);
+            ctl("BUTTON", "Clear Texture", BTN, CMD_MAT_CLEAR_TEXTURE, 8, 146, 94, 24);
+            ctl("BUTTON", "Assign to Selected Object", BTN, CMD_MAT_ASSIGN, 106, 146, 190, 24);
+            ctl("BUTTON", "Reset to Blender", BTN, CMD_MAT_RESET, 8, 174, 140, 24);
+            ctl("BUTTON", "Duplicate", BTN, CMD_MAT_DUP, 152, 174, 68, 24);
+            ctl("BUTTON", "Delete", BTN, CMD_MAT_DELETE, 224, 174, 72, 24);
+            ctl("STATIC", "TEXTURE", 0, ST_SECTION, 8, 212, 288, 16);
+            ctl("STATIC", "Camera", 0, 0, 8, 240, 62, 18);
+            ctl("COMBOBOX", "", COMBO, CB_MATCAM, 72, 236, 222, 150);
+            ctl("STATIC", "Mode", 0, 0, 8, 270, 62, 18);
+            ctl("COMBOBOX", "", COMBO, CB_MATMODE, 72, 266, 222, 150);
+            for (i, (label, a, b, unit)) in [("Tile", ED_MATTILE0, ED_MATTILE1, "times, u and v"), ("Offset", ED_MATOFF0, ED_MATOFF1, "u and v"), ("Scroll", ED_MATSCR0, ED_MATSCR1, "per second")].into_iter().enumerate() {
+                let y = 298 + i as i32 * 28;
+                ctl("STATIC", label, 0, 0, 8, y + 4, 62, 18);
+                ctl("EDIT", "", EDIT, a, 72, y, 68, 22);
+                ctl("EDIT", "", EDIT, b, 146, y, 68, 22);
+                ctl("STATIC", unit, 0, 0, 220, y + 4, 76, 18);
+            }
+            ctl("STATIC", "Rotate", 0, 0, 8, 386, 62, 18);
+            ctl("EDIT", "", EDIT, ED_MATROT, 72, 382, 68, 22);
+            ctl("STATIC", "degrees", 0, 0, 146, 386, 150, 18);
+            ctl("STATIC", "SURFACE", 0, ST_SECTION, 8, 418, 288, 16);
+            for (i, (label, id, unit)) in [
+                ("Alpha", ED_MATALPHA, "1 = solid"),
+                ("Bright", ED_MATBRIGHT, "x the colors"),
+                ("Glow", ED_MATGLOW, "0 lit, 1 self-lit"),
+                ("Cutout", ED_MATCUT, "hide texture alpha below"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let y = 442 + i as i32 * 28;
+                ctl("STATIC", label, 0, 0, 8, y + 4, 62, 18);
+                ctl("EDIT", "", EDIT, id, 72, y, 68, 22);
+                ctl("STATIC", unit, 0, 0, 146, y + 4, 150, 18);
+            }
+            ctl("BUTTON", "Hide back faces", BTN | CHECK, CMD_MAT_BACK, 8, 556, 140, 22);
+            ctl("BUTTON", "Ignore fog", BTN | CHECK, CMD_MAT_NOFOG, 152, 556, 140, 22);
+            ctl("STATIC", "Materials live in the file explorer (bottom): right-click it for New Material. Give an object a material with the Material box of the object, or Assign. Edits of a Blender material are kept when the .blend changes; Reset puts it back. Mode: Repeat tiles, Stretch fits the texture over the faces once, Mirror flips every other tile, Clamp stretches the edge.", 0, 0, 8, 590, 288, 130);
+            group.set(0);
+
             // Terrain settings (shown below the object details while a terrain is selected)
             group.set(3);
             dy.set(-504 + 596); // starts right below the object details
@@ -1033,7 +1158,9 @@ impl Window {
             ctl("BUTTON", "Ambient light...", BTN, CMD_ENV_AMBIENT, 8, 252, 140, 24);
             ctl("STATIC", "Strength", 0, 0, 156, 256, 56, 18);
             ctl("EDIT", "", EDIT, ED_AMBIENT, 216, 252, 68, 22);
-            ctl("STATIC", "", 0, ST_ENV_INFO, 8, 288, 288, 130);
+            ctl("STATIC", "Color depth", 0, 0, 8, 292, 78, 18);
+            ctl("COMBOBOX", "", COMBO, CB_COLORBITS, 88, 288, 206, 150);
+            ctl("STATIC", "", 0, ST_ENV_INFO, 8, 328, 288, 130);
 
             let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
             GetClientRect(main, &mut r);
@@ -1168,6 +1295,8 @@ impl Window {
             update(|i| {
                 i.tree_dbl_click |= std::mem::take(&mut ui.tree_dbl_click);
                 i.explorer_dbl_click |= std::mem::take(&mut ui.explorer_dbl_click);
+                i.tree_click |= std::mem::take(&mut ui.tree_click);
+                i.explorer_click |= std::mem::take(&mut ui.explorer_click);
                 if let Some(p) = ui.tree_rclick.take() {
                     i.tree_rclick = Some((p.0 as i32, p.1 as i32));
                 }
@@ -1177,7 +1306,7 @@ impl Window {
             });
         }
         let i = INPUT.get();
-        INPUT.set(Input { wheel: 0.0, tree_dbl_click: false, explorer_dbl_click: false, left_pressed: None, left_released: None, tree_rclick: None, explorer_rclick: None, ..i });
+        INPUT.set(Input { wheel: 0.0, tree_dbl_click: false, explorer_dbl_click: false, tree_click: false, explorer_click: false, left_pressed: None, left_released: None, tree_rclick: None, explorer_rclick: None, ..i });
         i
     }
 
@@ -1525,6 +1654,10 @@ impl Window {
         self.ui.borrow_mut().script_open.take()
     }
 
+    pub fn tree_set_mark(&self, item: isize, on: bool) {
+        self.ui.borrow_mut().tree_set_mark(item, on);
+    }
+
     pub fn tree_set_badge(&self, item: isize, on: bool) {
         self.ui.borrow_mut().tree_set_badge(item, on);
     }
@@ -1535,6 +1668,10 @@ impl Window {
 
     pub fn explorer_add(&self, name: &str, kind: &str, size: &str) {
         self.ui.borrow_mut().explorer_add(name, kind, size);
+    }
+
+    pub fn explorer_select(&self, row: usize) {
+        self.ui.borrow_mut().explorer_select(row);
     }
 
     pub fn explorer_selected(&self) -> Option<usize> {
@@ -1566,6 +1703,81 @@ impl Window {
     pub fn look_end(&self) {
         unsafe { ShowCursor(1) };
         LOOKING.set(false);
+    }
+
+    /// The 3D view in screen pixels: (x, y, width, height).
+    fn viewport_screen(&self) -> (i32, i32, i32, i32) {
+        let (x, y, w, h) = self.viewport_top();
+        let mut p = POINT { x, y };
+        unsafe { ClientToScreen(self.main, &mut p) };
+        (p.x, p.y, w, h)
+    }
+
+    /// Like [`Window::look_begin`], but the pointer first jumps to the middle of the 3D view, so the game
+    /// starts with the mouse in the centre of its screen.
+    pub fn look_begin_centered(&self) {
+        self.center_cursor();
+        self.look_begin();
+    }
+
+    /// Moves the pointer to the middle of the 3D view.
+    pub fn center_cursor(&self) {
+        let (x, y, w, h) = self.viewport_screen();
+        unsafe { SetCursorPos(x + w / 2, y + h / 2) };
+    }
+
+    /// Moves the pointer to (x, y) in 3D view pixels (kept inside the view).
+    pub fn set_cursor_pos(&self, x: i32, y: i32) {
+        let (vx, vy, w, h) = self.viewport_screen();
+        unsafe { SetCursorPos(vx + x.clamp(0, (w - 1).max(0)), vy + y.clamp(0, (h - 1).max(0))) };
+    }
+
+    /// Keeps the pointer inside the 3D view (a script's `mouse_lock`).
+    pub fn lock_cursor(&self, on: bool) {
+        CLIP_ON.set(on);
+        self.apply_clip();
+    }
+
+    /// Applies (or lifts) the pointer confinement; called every frame so it follows the window and its focus.
+    pub fn apply_clip(&self) {
+        let on = CLIP_ON.get() && unsafe { GetForegroundWindow() } == self.main;
+        if on {
+            let (x, y, w, h) = self.viewport_screen();
+            let r = RECT { left: x, top: y, right: x + w, bottom: y + h };
+            unsafe { ClipCursor(&r) };
+        } else {
+            unsafe { ClipCursor(std::ptr::null()) };
+        }
+    }
+
+    /// Chooses the pointer's look while playing: arrow, text, wait, cross, hand, move, no, resize_h, resize_v,
+    /// none (hidden) or auto (back to normal). False when the name is not one of those.
+    pub fn set_game_cursor(&self, name: &str) -> bool {
+        let id = match name {
+            "auto" | "default" => 0,
+            "arrow" => 32512,
+            "text" | "ibeam" => 32513,
+            "wait" => 32514,
+            "cross" | "crosshair" => 32515,
+            "hand" | "pointer" => 32649,
+            "move" => 32646,
+            "no" => 32648,
+            "resize_h" => 32644,
+            "resize_v" => 32645,
+            "none" | "hidden" => 0,
+            _ => return false,
+        };
+        GAME_SHAPE.set(id);
+        GAME_HIDDEN.set(name == "none" || name == "hidden");
+        true
+    }
+
+    /// Puts every mouse setting a script made back to normal (when playing stops).
+    pub fn reset_game_mouse(&self) {
+        GAME_SHAPE.set(0);
+        GAME_HIDDEN.set(false);
+        CLIP_ON.set(false);
+        self.apply_clip();
     }
 
     /// Where the cursor was when the mouse look began, in window coordinates.

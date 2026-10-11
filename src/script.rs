@@ -125,6 +125,25 @@ pub trait Host {
     }
     /// Frees the mouse cursor (true: the mouse clicks GUI buttons) or locks it for looking around again.
     fn set_cursor(&mut self, _free: Option<bool>) {}
+    /// Keeps the pointer inside the game view (true) or lets it leave (false).
+    fn mouse_lock(&mut self, _on: bool) {}
+    /// Moves the pointer to the middle of the game view.
+    fn mouse_center(&mut self) {}
+    /// Moves the pointer to (x, y) in game view pixels.
+    fn mouse_set(&mut self, _x: f64, _y: f64) {}
+    /// The pointer's look: "arrow", "hand", "cross", "text", "wait", "move", "no", "resize_h", "resize_v",
+    /// "none" (hidden) or "auto".
+    fn mouse_shape(&mut self, _name: &str) -> Result<(), String> {
+        Err("this host has no mouse".into())
+    }
+    /// The pointer position in game view pixels, and whether the left button is held (while the pointer is free).
+    fn mouse_state(&self) -> (f64, f64, bool) {
+        (0.0, 0.0, false)
+    }
+    /// Looks through a Camera object (None: back to the player's eyes).
+    fn set_camera(&mut self, _name: Option<&str>) -> Result<(), String> {
+        Err("this host has no cameras".into())
+    }
     /// Changes how the mouse works (see the GUI editor's modes).
     fn set_gui_mode(&mut self, _mode: &str) -> Result<(), String> {
         Err("this host has no GUI".into())
@@ -1215,6 +1234,46 @@ impl Run<'_> {
                         let free = v.truthy();
                         self.host.set_cursor(Some(free));
                     }
+                }
+                Value::Nil
+            }
+            "mouse_lock" => {
+                need(1, self)?;
+                let on = args[0].truthy();
+                self.host.mouse_lock(on);
+                Value::Nil
+            }
+            "mouse_center" => {
+                self.host.mouse_center();
+                Value::Nil
+            }
+            "mouse_set" => {
+                need(2, self)?;
+                let (x, y) = (n(self, 0)?, n(self, 1)?);
+                self.host.mouse_set(x, y);
+                Value::Nil
+            }
+            "mouse_cursor" => {
+                need(1, self)?;
+                let Value::Str(s) = &args[0] else { return self.fail("`mouse_cursor` needs a name in quotes: \"arrow\", \"hand\", \"cross\", \"text\", \"wait\", \"move\", \"no\", \"resize_h\", \"resize_v\", \"none\" or \"auto\"") };
+                if let Err(e) = self.host.mouse_shape(s) {
+                    return self.fail(e);
+                }
+                Value::Nil
+            }
+            "mouse_x" => Value::Num(self.host.mouse_state().0),
+            "mouse_y" => Value::Num(self.host.mouse_state().1),
+            "mouse_down" => Value::Bool(self.host.mouse_state().2),
+            "camera" => {
+                need(1, self)?;
+                let r = match &args[0] {
+                    Value::Obj(o) if o == "player" => self.host.set_camera(None),
+                    Value::Obj(o) => self.host.set_camera(Some(o)),
+                    Value::Nil => self.host.set_camera(None),
+                    _ => return self.fail("`camera` needs a Camera object, like camera(object(\"Cam1\")) or camera(player)"),
+                };
+                if let Err(e) = r {
+                    return self.fail(e);
                 }
                 Value::Nil
             }

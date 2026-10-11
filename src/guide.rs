@@ -93,10 +93,20 @@ BUILT-IN FUNCTIONS
     gui_value("Health", 0.5)        fill of a bar, 0 to 1 (gui_value("Health") reads it)
     gui_show("Menu", false)         show / hide      gui_move("Score", 20, 40)   x, y
     gui_color("Health", 1, 0, 0)    red, green, blue 0 to 1
+    camera(object("Cam"))           look through a Camera object (Add > Camera; it looks along its -Z, turn
+                                    it with Rotation); camera(player) returns to the player's eyes
     gui_mode("cursor")              how the mouse works: "look" (turns the camera), "cursor" (a pointer that
                                     clicks buttons), "toggle" (Tab switches) or "hold" (Ctrl); set in the GUI editor
     cursor(true)                    force the pointer on / off from a script ("auto" = follow the mode)
     clicked("Start")                true on the frame a button was clicked
+    MOUSE               the pointer starts in the middle of the game screen when playing starts.
+    mouse_lock(true)                keep the pointer inside the game view (false lets it leave again)
+    mouse_center()                  move the pointer to the middle of the game view
+    mouse_set(x, y)                 move the pointer to a spot of the game view, in pixels
+    mouse_cursor("hand")            pointer look: arrow hand cross text wait move no resize_h resize_v,
+                                    "none" hides it, "auto" is back to normal
+    mouse_x()  mouse_y()  mouse_down()   pointer position (pixels of the game view) and left button
+                                    (while the pointer is free, see cursor(true) / gui_mode)
     random()            0 to 1                      random(a, b)    between a and b
     sin cos tan atan2 abs sqrt floor ceil round sign pow min max
     clamp(v, lo, hi)    lerp(a, b, t)               (t = 0 gives a, 1 gives b)

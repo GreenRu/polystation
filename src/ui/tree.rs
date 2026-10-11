@@ -12,6 +12,8 @@ pub struct Node {
     pub bold: bool,
     /// This object has a script: a small button that opens it.
     pub badge: bool,
+    /// This camera is the one the game looks through (a small "CAM" tag).
+    pub mark: bool,
 }
 
 /// Where a dragged row would land relative to the row under the mouse.
@@ -60,7 +62,7 @@ impl Tree {
     /// Adds a node (under `parent`, or at the top) and returns its index.
     pub fn add(&mut self, parent: Option<usize>, text: &str, checked: bool) -> usize {
         let i = self.nodes.len();
-        self.nodes.push(Node { parent, children: Vec::new(), text: text.to_string(), checked, expanded: false, bold: false, badge: false });
+        self.nodes.push(Node { parent, children: Vec::new(), text: text.to_string(), checked, expanded: false, bold: false, badge: false, mark: false });
         match parent {
             Some(p) if p < i => self.nodes[p].children.push(i),
             _ => self.roots.push(i),
@@ -198,6 +200,9 @@ impl Tree {
             let node = &self.nodes[n];
             if self.selected == Some(n) {
                 c.r.rect(x + 4.0 * s, ry + 1.0, w - 8.0 * s, rh - 2.0, 5.0 * s, if focused { c_selection() } else { alpha(c_selection(), 0.5) }, 0.0, c_selection());
+            } else if node.bold {
+                // part of a multi-selection (the application marks these rows)
+                c.r.rect(x + 4.0 * s, ry + 1.0, w - 8.0 * s, rh - 2.0, 5.0 * s, if focused { alpha(c_selection(), 0.8) } else { alpha(c_selection(), 0.45) }, 0.0, c_selection());
             } else if self.hover == Some(n) {
                 c.r.rect(x + 4.0 * s, ry + 1.0, w - 8.0 * s, rh - 2.0, 5.0 * s, alpha([1.0; 4], 0.05), 0.0, c_selection());
             }
@@ -213,9 +218,15 @@ impl Tree {
             } else {
                 c.r.rect(cx, cy, cb, cb, 4.0 * s, c_field(), 1.0, c_border());
             }
-            let font = if node.bold { &c.f.bold } else { &c.f.ui };
+            let font = &c.f.ui;
             let color = if node.checked { c_text() } else { c_dim() };
             c.text_in(font, &node.text, cx + cb + 8.0 * s, ry, rh, color);
+            if node.mark {
+                let shift = if node.badge { 78.0 } else { 46.0 };
+                let b = [x + w - shift * s - 12.0 * s, ry + ((rh - 16.0 * s) * 0.5).floor(), 40.0 * s, 16.0 * s];
+                c.r.rect(b[0], b[1], b[2], b[3], 2.0 * s, [0.2, 0.62, 0.35, 1.0], 0.0, [0.2, 0.62, 0.35, 1.0]);
+                c.text_center(&c.f.bold, "CAM", b[0], b[1], b[2], b[3], [1.0; 4]);
+            }
             if node.badge {
                 let b = [x + w - 46.0 * s, ry + ((rh - 16.0 * s) * 0.5).floor(), 30.0 * s, 16.0 * s];
                 c.r.rect(b[0], b[1], b[2], b[3], 4.0 * s, if self.hover == Some(n) { c_accent() } else { alpha(c_accent(), 0.55) }, 0.0, c_accent());

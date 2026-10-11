@@ -384,6 +384,7 @@ impl Ui {
                     self.focus = Focus::List;
                     if let Some(r) = self.list.row_at(p, rect, s) {
                         self.list.selected = Some(r);
+                        self.explorer_click = true;
                     }
                     self.explorer_rclick = Some(p);
                     return Route::Ui;
@@ -545,10 +546,16 @@ impl Ui {
                     }
                 }
                 Hit::Row(n) => {
-                    self.tree.selected = Some(n);
+                    self.tree_click = true;
+                    let marked = self.tree.node(n).is_some_and(|x| x.bold) && !mods.ctrl && !mods.shift;
+                    if !marked || double {
+                        self.tree.selected = Some(n);
+                    }
                     if double {
                         self.tree_dbl_click = true;
                     } else {
+                        // a row of a multi-selection keeps the selection (so the whole group can be dragged);
+                        // a plain click on it, without dragging, selects just that row when the button comes up
                         self.active = Active::TreeDrag { node: n, start: p, on: false };
                     }
                 }
@@ -568,6 +575,7 @@ impl Ui {
                     }
                     if let Some(r) = self.list.row_at(p, rect, s) {
                         self.list.selected = Some(r);
+                        self.explorer_click = true;
                         if double {
                             self.explorer_dbl_click = true;
                         }
@@ -657,6 +665,9 @@ impl Ui {
                 Route::Ui
             }
             Active::TreeDrag { node, on, .. } => {
+                if !on && self.tree.node(node).is_some_and(|x| x.bold) {
+                    self.tree.selected = Some(node);
+                }
                 if on {
                     if let Some((target, at)) = self.tree.drop {
                         self.tree_drop = Some((node, target, at));

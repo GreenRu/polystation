@@ -5,6 +5,7 @@ mod gl;
 mod graph;
 mod gui;
 mod hier;
+mod image;
 mod import;
 mod json;
 mod mcp;
@@ -74,17 +75,27 @@ flat out vec3 v_n;
 flat out vec4 v_rect;
 flat out vec4 v_col;
 flat out vec4 v_utex;
+flat out vec4 v_matx;
+flat out vec4 v_uvbox;
+flat out vec4 v_tile;
+flat out vec4 v_scroll;
+flat out vec4 v_surf;
 flat out float v_state;
 flat out float v_oid;
 flat out float v_alpha;
 smooth out float v_dist;
 void main() {
     int id = int(oid + 0.5);
-    ivec2 b = ivec2(7 * (id % 256), id / 256);
+    ivec2 b = ivec2(12 * (id % 256), id / 256);
     mat4 m = mat4(texelFetch(objs, b, 0), texelFetch(objs, b + ivec2(1, 0), 0),
                   texelFetch(objs, b + ivec2(2, 0), 0), texelFetch(objs, b + ivec2(3, 0), 0));
     v_col = texelFetch(objs, b + ivec2(4, 0), 0);
     v_utex = texelFetch(objs, b + ivec2(6, 0), 0);
+    v_matx = texelFetch(objs, b + ivec2(7, 0), 0);
+    v_uvbox = texelFetch(objs, b + ivec2(8, 0), 0);
+    v_tile = texelFetch(objs, b + ivec2(9, 0), 0);
+    v_scroll = texelFetch(objs, b + ivec2(10, 0), 0);
+    v_surf = texelFetch(objs, b + ivec2(11, 0), 0);
     vec4 flags = texelFetch(objs, b + ivec2(5, 0), 0);
     float st = flags.x;
     v_alpha = flags.y;
@@ -124,7 +135,7 @@ void main() {
             lit += lCol[i].rgb * max(dot(n, L), 0.0) * att;
         }
     }
-    v_lit = (flags.w > 0.5) ? vec3(1.0) : lit; // light markers glow by themselves
+    v_lit = (flags.w > 0.5) ? vec3(1.0) : mix(lit, vec3(1.0), clamp(texelFetch(objs, b + ivec2(10, 0), 0).w, 0.0, 1.0)); // light markers and glowing materials shine by themselves
 }
 ";
 
@@ -133,10 +144,13 @@ void main() {
 // mode: 0 textured+lit, 1 solid, 2 unlit, 3 object colours, 4 wire lines.
 const FS: &str = "uniform sampler2D atlas;
 uniform sampler2D userAtlas;
+uniform sampler2D camTex;
 uniform float cutoff;
 uniform int drawPass;
 uniform int mode;
 uniform int affine;
+uniform int cullOn;
+uniform float time;
 smooth in vec3 v_lit;
 smooth in vec2 v_uv_p;
 noperspective in vec2 v_uv_a;
@@ -144,28 +158,52 @@ flat in vec3 v_n;
 flat in vec4 v_rect;
 flat in vec4 v_col;
 flat in vec4 v_utex;
+flat in vec4 v_matx;
+flat in vec4 v_uvbox;
+flat in vec4 v_tile;    // uv tiling (xy), offset (zw)
+flat in vec4 v_scroll;  // scroll per second (xy), rotation in radians (z), glow (w)
+flat in vec4 v_surf;    // brightness, cutout, hide back faces, ignore fog
 flat in float v_state;
 flat in float v_oid;
 flat in float v_alpha;
 smooth in float v_dist;
 out vec4 color;
+// how a texture covers the faces: 0 repeat, 1 stretch over the material's UV range, 2 mirror, 3 clamp
+vec2 apply_mode(vec2 uv) {
+    float m = v_matx.x;
+    if (m < 0.5) return fract(uv);
+    if (m < 1.5) return clamp((uv - v_uvbox.xy) * v_uvbox.zw, 0.0, 1.0);
+    if (m < 2.5) {
+        vec2 t = mod(uv, 2.0);
+        return mix(t, 2.0 - t, step(1.0, t));
+    }
+    return clamp(uv, 0.0, 1.0);
+}
+// the material's own change of the UVs: turn around the middle, tile, shift, slide with time
+vec2 surf_uv(vec2 uv) {
+    vec2 q = uv - 0.5;
+    float c = cos(v_scroll.z), s = sin(v_scroll.z);
+    q = vec2(c * q.x - s * q.y, s * q.x + c * q.y);
+    return (q + 0.5) * v_tile.xy + v_tile.zw + v_scroll.xy * time;
+}
 void main() {
     vec3 orange = vec3(1.0, 0.6, 0.1);
     if (mode == 4) {
         color = vec4(apply_fog(v_state > 1.5 ? orange : vec3(0.82), v_dist), 1.0);
         return;
     }
+    if (!gl_FrontFacing && (cullOn != 0 || v_surf.z > 0.5)) discard;
     // pass 0: opaque objects; 1: translucent materials; 2: opaque materials of translucent objects
     if (drawPass == 0 && v_alpha < 0.999) discard;
     if (drawPass == 2 && v_alpha >= 0.999) discard;
-    vec2 uv = (affine != 0) ? v_uv_a : v_uv_p;
+    vec2 uv = surf_uv((affine != 0) ? v_uv_a : v_uv_p);
     ivec2 size = textureSize(atlas, 0);
     ivec2 p;
     if (v_rect.z <= 0.0) {
         p = clamp(ivec2(clamp(uv, 0.0, 1.0) * vec2(size)), ivec2(0), size - 1);
     } else {
         ivec2 wh = ivec2(v_rect.zw);
-        p = ivec2(v_rect.xy) + min(ivec2(fract(uv) * v_rect.zw), wh - 1);
+        p = ivec2(v_rect.xy) + min(ivec2(apply_mode(uv) * v_rect.zw), wh - 1);
     }
     vec4 t = texelFetch(atlas, p, 0);
     vec3 base = t.rgb;
@@ -173,7 +211,7 @@ void main() {
     if (v_utex.z > 0.0) {
         // a texture the user assigned to the object (in the user atlas); the colour, if set, tints it
         ivec2 uw = ivec2(v_utex.zw);
-        ivec2 up = ivec2(v_utex.xy) + min(ivec2(fract(uv) * v_utex.zw), uw - 1);
+        ivec2 up = ivec2(v_utex.xy) + min(ivec2(apply_mode(uv) * v_utex.zw), uw - 1);
         vec4 ut = texelFetch(userAtlas, up, 0);
         base = ut.rgb * (v_col.a > 0.5 ? v_col.rgb : vec3(1.0));
         a = ut.a;
@@ -181,6 +219,16 @@ void main() {
         base = v_col.rgb;
         a = 1.0;
     }
+    if (v_matx.y > 0.5) {
+        // the view of a Camera object, drawn into a quarter of the camera atlas
+        float tile = floor(v_matx.y - 0.5);
+        vec2 o = vec2(mod(tile, 2.0), floor(tile / 2.0)) * 0.5;
+        vec3 ct = texture(camTex, o + apply_mode(uv) * 0.496 + 0.002).rgb;
+        base = ct * (v_col.a > 0.5 ? v_col.rgb : vec3(1.0));
+        a = 1.0;
+    }
+    base *= v_surf.x;
+    if (v_surf.y > 0.0 && a < v_surf.y) discard; // cut out the see-through parts of the texture
     a *= v_alpha;
     if (a < cutoff) discard;
     vec3 n = normalize(v_n);
@@ -198,7 +246,7 @@ void main() {
         rgb = base * k;
     }
     if (v_state > 1.5) rgb = mix(rgb, orange, 0.45); // selection highlight
-    color = vec4(apply_fog(rgb, v_dist), a);
+    color = vec4(v_surf.w > 0.5 ? rgb : apply_fog(rgb, v_dist), a);
 }
 ";
 
@@ -226,6 +274,30 @@ uniform vec3 skySolid;
 uniform vec3 skyTop;
 uniform vec3 skyBottom;
 uniform sampler2D skyTex;
+uniform int colorBits;
+float bayer8(ivec2 p) {
+    int x = p.x & 7;
+    int y = p.y & 7;
+    int xy = x ^ y;
+    int v = ((y & 1) << 5) | ((xy & 1) << 4) | (((y >> 1) & 1) << 3) | (((xy >> 1) & 1) << 2) | (((y >> 2) & 1) << 1) | ((xy >> 2) & 1);
+    return (float(v) + 0.5) / 64.0;
+}
+vec3 reduce_color(vec3 c) {
+    if (colorBits >= 24) return c;
+    float d = bayer8(ivec2(gl_FragCoord.xy)) - 0.5;
+    if (colorBits >= 12) {
+        vec3 lv = vec3(31.0, 63.0, 31.0);
+        return clamp(floor(c * lv + 0.5 + d * 0.9) / lv, 0.0, 1.0);
+    }
+    if (colorBits >= 6) {
+        vec3 lv = vec3(7.0, 7.0, 3.0);
+        return clamp(floor(c * lv + 0.5 + d * 0.9) / lv, 0.0, 1.0);
+    }
+    float lum = dot(c, vec3(0.3, 0.59, 0.11));
+    vec3 bits = step(vec3(0.5), c + d * 0.35);
+    float bright = (lum + d * 0.3) > 0.5 ? 1.0 : 0.6;
+    return bits * bright;
+}
 void main() {
     vec3 dir = normalize(camF + camR * (ndc.x * tanHalf * aspect) + camU * (ndc.y * tanHalf));
     vec3 c;
@@ -238,7 +310,7 @@ void main() {
         float v = asin(clamp(dir.y, -1.0, 1.0)) / 3.1415927 + 0.5;
         c = texture(skyTex, vec2(u, v)).rgb;
     }
-    color = vec4(c, 1.0);
+    color = vec4(reduce_color(c), 1.0);
 }
 ";
 
@@ -396,11 +468,32 @@ float bayer8(ivec2 p) {
     int v = ((y & 1) << 5) | ((xy & 1) << 4) | (((y >> 1) & 1) << 3) | (((xy >> 1) & 1) << 2) | (((y >> 2) & 1) << 1) | ((xy >> 2) & 1);
     return (float(v) + 0.5) / 64.0;
 }
+
+// Colour depth: 32 = full colour; 16 = 5-6-5 bits per channel; 8 = 3-3-2; 4 = 16 colours (red, green, blue and
+// an intensity bit). Below 32 the colour steps are mixed with a 1-pixel ordered dither, like a console's
+// dithered framebuffer.
+uniform int colorBits;
+vec3 reduce_color(vec3 c) {
+    if (colorBits >= 24) return c;
+    float d = bayer8(ivec2(gl_FragCoord.xy)) - 0.5;
+    if (colorBits >= 12) {
+        vec3 lv = vec3(31.0, 63.0, 31.0);
+        return clamp(floor(c * lv + 0.5 + d * 0.9) / lv, 0.0, 1.0);
+    }
+    if (colorBits >= 6) {
+        vec3 lv = vec3(7.0, 7.0, 3.0);
+        return clamp(floor(c * lv + 0.5 + d * 0.9) / lv, 0.0, 1.0);
+    }
+    float lum = dot(c, vec3(0.3, 0.59, 0.11));
+    vec3 bits = step(vec3(0.5), c + d * 0.35);
+    float bright = (lum + d * 0.3) > 0.5 ? 1.0 : 0.6;
+    return bits * bright;
+}
 vec3 apply_fog(vec3 rgb, float dist) {
-    if (fog == 0) return rgb;
+    if (fog == 0) return reduce_color(rgb);
     float f = clamp((dist - fogRange.x) / max(fogRange.y - fogRange.x, 1e-4), 0.0, 1.0);
     if (fog == 2) f = floor(f * fogSteps + bayer8(ivec2(gl_FragCoord.xy) / max(ditherCell, 1))) / fogSteps;
-    return mix(rgb, fogColor, f);
+    return reduce_color(mix(rgb, fogColor, f));
 }
 ";
 
@@ -585,6 +678,11 @@ unsafe fn upload_atlas(g: &gl::Gl, tex: u32, atlas: &atlas::Atlas) {
 
 /// Objects per row of the per-object data texture (6 texels each).
 const OBJ_PER_ROW: usize = 256;
+/// Side of the camera atlas texture; each of its four tiles is half of it.
+const CAM_ATLAS: i32 = 512;
+/// Texels per object in the data texture: 4 matrix, colour, flags, user texture rect, texture mode + camera, UV box,
+/// then the material: tiling + offset, scroll + rotation + glow, brightness + cutout + back faces + fog.
+const TEXELS: usize = 12;
 
 struct Explorer {
     /// Tree item per node; 0 for deleted nodes (they are not shown).
@@ -624,6 +722,7 @@ fn build_explorer(window: &win32::Window, mesh: &obj::Mesh, hier: &[(String, Str
             obj::Kind::Object => node.name.clone(),
             obj::Kind::Collection => format!("[{}]", node.name),
             obj::Kind::Environment => format!("<{}>", node.name),
+            obj::Kind::Material => format!("• {}", node.material_name().unwrap_or(&node.name)),
         };
         let parent = node.parent.map(|p| handles[p]);
         handles[i] = window.tree_add(parent, &label, !hidden);
@@ -683,6 +782,11 @@ struct Runtime {
     texture: Vec<Option<String>>,
     /// Deleted nodes, including everything inside a deleted collection.
     deleted: Vec<bool>,
+    /// How the node's texture covers its faces (a `scene::TexMode` index), and the Camera object shown on it.
+    mode: Vec<u8>,
+    camera: Vec<Option<String>>,
+    /// The rest of the node's material (tiling, scrolling, glow ...).
+    surf: Vec<scene::Surface>,
 }
 
 /// Node `i` of the composed mesh: from the model, the "Primitives" collection, or an added primitive.
@@ -704,6 +808,36 @@ fn node_ref(n_base: usize, i: usize) -> NodeRef {
     } else {
         NodeRef::Extra(i - n_base - 2)
     }
+}
+
+/// What a material looks like (see `App::material_view`).
+struct MatView {
+    color: Option<[f32; 3]>,
+    alpha: f32,
+    texture: Option<String>,
+    mode: u8,
+    camera: Option<String>,
+    surf: scene::Surface,
+}
+
+/// Puts the settings of a material over what a node has so far.
+fn apply_material(m: &scene::MaterialEdit, color: &mut Option<[f32; 3]>, alpha: &mut f32, texture: &mut Option<String>, mode: &mut u8, camera: &mut Option<String>, surf: &mut scene::Surface) {
+    if m.color.is_some() {
+        *color = m.color;
+    }
+    if let Some(t) = &m.texture {
+        *texture = Some(t.clone());
+    }
+    if let Some(a) = m.alpha {
+        *alpha = a;
+    }
+    if let Some(md) = m.mode {
+        *mode = md.index() as u8;
+    }
+    if m.camera.is_some() {
+        *camera = m.camera.clone();
+    }
+    m.apply(surf);
 }
 
 fn compute_runtime(n_base: usize, mesh: &obj::Mesh, edits: &Edits) -> Runtime {
@@ -735,11 +869,33 @@ fn compute_runtime(n_base: usize, mesh: &obj::Mesh, edits: &Edits) -> Runtime {
                     .then(|| edits.extras.iter().find(|t| t.prim == prims::Prim::Terrain && t.name == ex.scatter.target).map(|t| t.xform))
                     .flatten();
                 xf.push(layer_xf.unwrap_or(ex.xform));
-                color.push(edits.extras[j].color);
-                alpha.push(edits.extras[j].alpha);
-                texture.push(edits.extras[j].texture.clone());
+                // a camera has no color, opacity or texture
+                let cam = ex.prim == prims::Prim::Camera;
+                color.push(if cam { None } else { edits.extras[j].color });
+                alpha.push(if cam { 1.0 } else { edits.extras[j].alpha });
+                texture.push(if cam { None } else { edits.extras[j].texture.clone() });
                 deleted.push(false);
             }
+        }
+    }
+    // materials: an object takes the material assigned to it, then each of its model materials starts from the
+    // object's look and puts its own edits over it
+    let (mut mode, mut camera, mut surf) = (vec![0u8; n], vec![None::<String>; n], vec![scene::Surface::default(); n]);
+    for (i, node) in mesh.nodes.iter().enumerate() {
+        if node.kind != obj::Kind::Object {
+            continue;
+        }
+        let is_camera = matches!(node_ref(n_base, i), NodeRef::Extra(j) if edits.extras[j].prim == prims::Prim::Camera);
+        if let (false, Some(m)) = (is_camera, edits.assign.get(&node.name).and_then(|m| edits.materials.get(m))) {
+            apply_material(m, &mut color[i], &mut alpha[i], &mut texture[i], &mut mode[i], &mut camera[i], &mut surf[i]);
+        }
+    }
+    for i in 0..n {
+        let Some(name) = mesh.nodes[i].material_name() else { continue };
+        let p = mesh.nodes[i].parent.unwrap_or(0);
+        (xf[i], color[i], alpha[i], texture[i], mode[i], camera[i], surf[i]) = (xf[p], color[p], alpha[p], texture[p].clone(), mode[p], camera[p].clone(), surf[p]);
+        if let Some(m) = edits.materials.get(name) {
+            apply_material(m, &mut color[i], &mut alpha[i], &mut texture[i], &mut mode[i], &mut camera[i], &mut surf[i]);
         }
     }
     // everything inside a deleted node is gone with it
@@ -757,7 +913,7 @@ fn compute_runtime(n_base: usize, mesh: &obj::Mesh, edits: &Edits) -> Runtime {
             }
         }
     }
-    Runtime { xf, color, alpha, texture, deleted }
+    Runtime { xf, color, alpha, texture, deleted, mode, camera, surf }
 }
 
 /// Per-object extras of the object data texture: hidden by script / play mode, water, glowing.
@@ -767,25 +923,33 @@ struct ObjFx {
     emissive: HashSet<usize>,
 }
 
-unsafe fn upload_objects(g: &gl::Gl, tex: u32, mesh: &obj::Mesh, ex: &Explorer, rt: &Runtime, rects: &HashMap<String, [f32; 4]>, fx: &ObjFx) {
+unsafe fn upload_objects(g: &gl::Gl, tex: u32, mesh: &obj::Mesh, ex: &Explorer, rt: &Runtime, rects: &HashMap<String, [f32; 4]>, fx: &ObjFx, uv: &[[f32; 4]], tiles: &[String]) {
     let n = mesh.nodes.len();
     let rows = n.div_ceil(OBJ_PER_ROW).max(1);
-    let width = 7 * OBJ_PER_ROW;
+    let width = TEXELS * OBJ_PER_ROW;
     let mut buf = vec![0f32; width * rows * 4];
     for (i, node) in mesh.nodes.iter().enumerate() {
         let x = &rt.xf[i];
         let m = math::model_matrix(x.pos, x.rot, x.scale, node.center);
         let selected = ex.multi.iter().any(|&s| is_ancestor_or_self(mesh, s, i));
-        let hidden = !ex.checked[i] || rt.deleted[i] || fx.hidden.contains(&i);
+        let owner = mesh.object_of(i); // a material follows the visibility of its object
+        let hidden = !ex.checked[i] || !ex.checked[owner] || rt.deleted[i] || fx.hidden.contains(&owner);
         let state = if hidden { 1.0 } else if selected { 2.0 } else { 0.0 };
         let c = rt.color[i];
-        let texel = ((i / OBJ_PER_ROW) * width + 7 * (i % OBJ_PER_ROW)) * 4;
+        let texel = ((i / OBJ_PER_ROW) * width + TEXELS * (i % OBJ_PER_ROW)) * 4;
         buf[texel..texel + 16].copy_from_slice(&m);
         buf[texel + 16..texel + 20].copy_from_slice(&c.map_or([0.0; 4], |c| [c[0], c[1], c[2], 1.0]));
         buf[texel + 20] = state;
         buf[texel + 21] = rt.alpha[i];
-        buf[texel + 22] = if fx.water.contains(&i) { 1.0 } else { 0.0 };
-        buf[texel + 23] = if fx.emissive.contains(&i) { 1.0 } else { 0.0 };
+        buf[texel + 22] = if fx.water.contains(&owner) { 1.0 } else { 0.0 };
+        buf[texel + 23] = if fx.emissive.contains(&owner) { 1.0 } else { 0.0 };
+        buf[texel + 28] = rt.mode[i] as f32;
+        buf[texel + 29] = rt.camera[i].as_ref().and_then(|c| tiles.iter().position(|t| t == c)).map_or(0.0, |t| t as f32 + 1.0);
+        buf[texel + 32..texel + 36].copy_from_slice(&uv.get(i).copied().unwrap_or([0.0, 0.0, 1.0, 1.0]));
+        let s = &rt.surf[i];
+        buf[texel + 36..texel + 40].copy_from_slice(&[s.tile[0], s.tile[1], s.offset[0], s.offset[1]]);
+        buf[texel + 40..texel + 44].copy_from_slice(&[s.scroll[0], s.scroll[1], s.rotate.to_radians(), s.glow]);
+        buf[texel + 44..texel + 48].copy_from_slice(&[s.bright, s.cutout, s.back_cull as u8 as f32, s.no_fog as u8 as f32]);
         if let Some(r) = rt.texture[i].as_ref().and_then(|p| rects.get(p)) {
             buf[texel + 24..texel + 28].copy_from_slice(r);
         }
@@ -850,7 +1014,7 @@ const MODE_NAMES: [&str; 6] = ["Textured", "Solid", "Wireframe", "Textured + Wir
 // ------------------------------------------------------------------------------------------
 
 /// Widget size and margin in pixels at 96 dpi.
-const COMPASS_SIZE: f32 = 150.0;
+const COMPASS_SIZE: f32 = 156.0;
 const COMPASS_MARGIN: f32 = 10.0;
 
 /// One end of a world axis as drawn in the widget (coordinates in the widget's -1..1 square).
@@ -907,6 +1071,26 @@ enum Handle {
 
 /// A handle being dragged. `start` is the transform when the drag began; `t0` the handle's initial
 /// parameter (distance along the axis, angle around it, or on-screen distance for uniform scale).
+struct CompassDrag {
+    last: (i32, i32),
+    start: (i32, i32),
+    dir: Option<[f32; 3]>,
+    moved: bool,
+    pivot: [f32; 3],
+    dist: f32,
+}
+
+struct SurfDrag {
+    start: (i32, i32),
+    moved: bool,
+    /// Every dragged object with its transform when the drag began.
+    items: Vec<(usize, Xform)>,
+    primary: usize,
+    /// Distance from the primary object's pivot down to its lowest point.
+    bottom: f32,
+    exclude: HashSet<usize>,
+}
+
 #[derive(Clone)]
 struct Drag {
     /// Every dragged object with its transform when the drag began.
@@ -1303,8 +1487,49 @@ impl script::Host for PlayHost<'_> {
         self.app.gui_clicks.iter().any(|n| n == name)
     }
 
+    fn set_camera(&mut self, name: Option<&str>) -> Result<(), String> {
+        match name {
+            None => self.app.play_camera = None,
+            Some(n) => {
+                let i = self.node(n)?;
+                let nb = self.app.base.nodes.len();
+                if !matches!(node_ref(nb, i), NodeRef::Extra(j) if self.app.edits.extras[j].prim == prims::Prim::Camera) {
+                    return Err(format!("\"{n}\" is not a Camera object (Add > Camera)"));
+                }
+                self.app.play_camera = Some(n.to_string());
+            }
+        }
+        Ok(())
+    }
+
     fn set_cursor(&mut self, free: Option<bool>) {
         self.app.cursor_override = free; // the frame loop applies it
+    }
+
+    fn mouse_lock(&mut self, on: bool) {
+        self.app.window.lock_cursor(on);
+    }
+
+    fn mouse_center(&mut self) {
+        self.app.window.center_cursor();
+    }
+
+    fn mouse_set(&mut self, x: f64, y: f64) {
+        if x.is_finite() && y.is_finite() {
+            self.app.window.set_cursor_pos(x as i32, y as i32);
+        }
+    }
+
+    fn mouse_shape(&mut self, name: &str) -> Result<(), String> {
+        if self.app.window.set_game_cursor(name) {
+            Ok(())
+        } else {
+            Err("the pointer shapes are \"arrow\", \"hand\", \"cross\", \"text\", \"wait\", \"move\", \"no\", \"resize_h\", \"resize_v\", \"none\" or \"auto\"".into())
+        }
+    }
+
+    fn mouse_state(&self) -> (f64, f64, bool) {
+        (self.app.gui_mouse.0 as f64, self.app.gui_mouse.1 as f64, self.app.gui_down)
     }
 
     fn set_gui_mode(&mut self, mode: &str) -> Result<(), String> {
@@ -1404,6 +1629,11 @@ struct App {
     script_vars: HashMap<String, script::Value>,
     hud: String,
     press: Option<((i32, i32), bool)>,
+    /// A press on the orientation gizmo: where, which axis end it was on, whether it turned into a drag, and the
+    /// point (and distance) the view orbits around.
+    compass_drag: Option<CompassDrag>,
+    /// Dragging selected objects over the surfaces of the scene.
+    surf: Option<SurfDrag>,
     orbit: Option<([f32; 3], f32)>,
     last_mouse: Option<(i32, i32)>,
     poll_t: Instant,
@@ -1416,6 +1646,8 @@ struct App {
     game_mode: bool,
     /// The object whose script was typed in last, and when (typing is grouped into one undo step).
     script_undo: Option<(String, Instant)>,
+    /// The camera object scripts are looking through (None: the player's eyes).
+    play_camera: Option<String>,
     /// The mouse is a pointer right now (GUI buttons can be clicked) instead of turning the camera.
     cursor_free: bool,
     /// A script forced the pointer on / off (None: the GUI mode decides).
@@ -1429,6 +1661,14 @@ struct App {
     gui_down: bool,
     /// How the game is compiled (asked for in a dialog; saved with the project).
     build: build::BuildSettings,
+    /// The camera atlas: a 512 x 512 texture holding up to four camera views (256 x 256 tiles) drawn into a
+    /// framebuffer, shown on the materials that use a camera.
+    cam_fbo: u32,
+    cam_tex: u32,
+    /// Per node: the UV range of its faces (for the "stretch" texture mode).
+    uv_boxes: Vec<[f32; 4]>,
+    /// The Camera objects whose views are drawn into the camera atlas (at most four), in tile order.
+    camera_tiles: Vec<String>,
     /// Models imported into the scene (on top of `model_path`), and the scene's current texture atlas.
     imports: Vec<String>,
     base_atlas: Option<atlas::Atlas>,
@@ -1440,6 +1680,10 @@ struct App {
     /// Folder shown in the file explorer and its rows (name, is a folder); row 0 may be "..".
     explorer_dir: PathBuf,
     explorer_items: Vec<(String, bool)>,
+    /// The material shown in the material panel (picked in the file explorer), and the material list the
+    /// explorer was last built for.
+    sel_mat: Option<String>,
+    mat_lib_key: Vec<(String, bool)>,
     /// Chunk the camera is in, per added object (only chunked terrains care).
     terrain_views: Vec<(i32, i32)>,
     /// Rubber-band selection rectangle (start, current) in canvas pixels.
@@ -1479,6 +1723,7 @@ struct Locs {
     cutoff: i32,
     mode: i32,
     affine: i32,
+    cull_on: i32,
     cam: i32,
     fog: i32,
     fog_range: i32,
@@ -1702,18 +1947,40 @@ impl App {
             let locs = Locs {
                 n_lights: loc(b"nLights\0"), l_pos: loc(b"lPos\0"), l_col: loc(b"lCol\0"), l_dir: loc(b"lDir\0"), ambient: loc(b"ambient\0"),
                 time: loc(b"time\0"),
-                mvp: loc(b"mvp\0"), cutoff: loc(b"cutoff\0"), mode: loc(b"mode\0"), affine: loc(b"affine\0"),
+                mvp: loc(b"mvp\0"), cutoff: loc(b"cutoff\0"), mode: loc(b"mode\0"), affine: loc(b"affine\0"), cull_on: loc(b"cullOn\0"),
                 cam: loc(b"cam\0"), fog: loc(b"fog\0"), fog_range: loc(b"fogRange\0"), draw_pass: loc(b"drawPass\0"), dither: loc(b"ditherCell\0"), fog_color: loc(b"fogColor\0"), fog_steps: loc(b"fogSteps\0"),
             };
             (g.glUniform1i)(loc(b"atlas\0"), 0);
             (g.glUniform1i)(loc(b"objs\0"), 1);
+            (g.glUniform1i)(loc(b"camTex\0"), 4);
+            // the camera atlas: colour texture + depth, drawn into by `update_camera_atlas`
+            let (mut cam_tex, mut cam_fbo, mut cam_depth) = (0u32, 0u32, 0u32);
+            (g.glGenTextures)(1, &mut cam_tex);
+            (g.glActiveTexture)(gl::TEXTURE4);
+            (g.glBindTexture)(gl::TEXTURE_2D, cam_tex);
+            (g.glTexImage2D)(gl::TEXTURE_2D, 0, gl::RGBA8 as i32, CAM_ATLAS, CAM_ATLAS, 0, gl::RGBA, gl::UNSIGNED_BYTE, std::ptr::null());
+            for (p, v) in [(gl::TEXTURE_MIN_FILTER, gl::NEAREST), (gl::TEXTURE_MAG_FILTER, gl::NEAREST), (gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE), (gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE)] {
+                (g.glTexParameteri)(gl::TEXTURE_2D, p, v);
+            }
+            (g.glGenRenderbuffers)(1, &mut cam_depth);
+            (g.glBindRenderbuffer)(gl::RENDERBUFFER, cam_depth);
+            (g.glRenderbufferStorage)(gl::RENDERBUFFER, gl::DEPTH_COMPONENT24, CAM_ATLAS, CAM_ATLAS);
+            (g.glGenFramebuffers)(1, &mut cam_fbo);
+            (g.glBindFramebuffer)(gl::FRAMEBUFFER, cam_fbo);
+            (g.glFramebufferTexture2D)(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, gl::TEXTURE_2D, cam_tex, 0);
+            (g.glFramebufferRenderbuffer)(gl::FRAMEBUFFER, gl::DEPTH_ATTACHMENT, gl::RENDERBUFFER, cam_depth);
+            if (g.glCheckFramebufferStatus)(gl::FRAMEBUFFER) != gl::FRAMEBUFFER_COMPLETE {
+                eprintln!("warning: the camera texture framebuffer is incomplete; camera materials will be black");
+            }
+            (g.glBindFramebuffer)(gl::FRAMEBUFFER, 0);
+            (g.glActiveTexture)(gl::TEXTURE0);
             let l = math::normalize([0.4, 1.0, 0.6]);
             (g.glUniform3f)(loc(b"light\0"), l[0], l[1], l[2]);
             let gloc = |name: &[u8]| (g.glGetUniformLocation)(grid_prog, name.as_ptr());
             let grid_locs = Locs {
                 n_lights: 0, l_pos: 0, l_col: 0, l_dir: 0, ambient: 0,
                 time: 0,
-                mvp: gloc(b"mvp\0"), cutoff: 0, mode: 0, affine: 0,
+                mvp: gloc(b"mvp\0"), cutoff: 0, mode: 0, affine: 0, cull_on: 0,
                 cam: gloc(b"cam\0"), fog: gloc(b"fog\0"), fog_range: gloc(b"fogRange\0"), draw_pass: 0, dither: gloc(b"ditherCell\0"), fog_color: gloc(b"fogColor\0"), fog_steps: gloc(b"fogSteps\0"),
             };
 
@@ -1775,8 +2042,8 @@ impl App {
                 cam: Cam { yaw: 0.0, pitch: 0.0, pos: [0.0; 3] }, speed_mul: 1.0, view: View::default(),
                 model_path, atlas_arg, project_path, watcher, tx, imports, base_atlas,
                 objects_dirty: true, details_dirty: true, look_active: false, rmb: None, play: None, script_hidden: HashSet::new(), script_vars: HashMap::new(), hud: String::new(), underwater: false, play_hidden: HashSet::new(), press: None, orbit: None, last_mouse: None,
-                poll_t: Instant::now(), status_t: Instant::now() - Duration::from_secs(1), fps: 60.0, shot: None, shot_waiters: Vec::new(), game_mode: false, script_undo: None, cursor_free: false, cursor_override: None, tab_free: false, tab_prev: false, gui_clicks: Vec::new(), gui_mouse: (0.0, 0.0), gui_down: false, build: startup.as_ref().map(|s| s.build.clone()).unwrap_or_default(), settings: settings::Settings::load(),
-                gizmo: Gizmo::Move, drag: None, hover: None, box_sel: None, explorer_dir: PathBuf::new(), explorer_items: Vec::new(), terrain_views: Vec::new(), last_mvp: math::identity(), gizmo_vao, gizmo_vbo,
+                poll_t: Instant::now(), status_t: Instant::now() - Duration::from_secs(1), fps: 60.0, shot: None, shot_waiters: Vec::new(), game_mode: false, script_undo: None, cam_fbo, cam_tex, uv_boxes: Vec::new(), camera_tiles: Vec::new(), compass_drag: None, surf: None, play_camera: None, cursor_free: false, cursor_override: None, tab_free: false, tab_prev: false, gui_clicks: Vec::new(), gui_mouse: (0.0, 0.0), gui_down: false, build: startup.as_ref().map(|s| s.build.clone()).unwrap_or_default(), settings: settings::Settings::load(),
+                gizmo: Gizmo::Move, drag: None, hover: None, box_sel: None, explorer_dir: PathBuf::new(), explorer_items: Vec::new(), sel_mat: None, mat_lib_key: Vec::new(), terrain_views: Vec::new(), last_mvp: math::identity(), gizmo_vao, gizmo_vbo,
                 grid_inf_prog, grid_inf, sky_prog, sky_vao, sky_locs, sky_tex, sky_loaded: None,
                 particle_prog, particle_locs, t0: Instant::now(),
                 user_tex, utex_rects: HashMap::new(), utex_key: Vec::new(), utex_cache: HashMap::new(), tex_tx,
@@ -1847,6 +2114,7 @@ impl App {
         self.mesh = scene::compose(&self.base, &self.edits.extras, &self.terrain_views);
         hier::apply(&mut self.mesh.nodes, &self.base.nodes, &self.edits.hier);
         self.rt = compute_runtime(self.base.nodes.len(), &self.mesh, &self.edits);
+        self.uv_boxes = self.mesh.uv_boxes();
         unsafe { upload_mesh(&self.g, self.vbo, self.ebo, self.wire_ebo, &self.mesh) };
         self.ex = build_explorer(&self.window, &self.mesh, &self.edits.hier, hidden, selected, &self.rt.deleted);
         self.sync_script_badges();
@@ -1983,6 +2251,12 @@ impl App {
             self.window.explorer_add(&format!("{d}\\"), "Folder", "");
             self.explorer_items.push((d, true));
         }
+        // the materials of the project are listed like files (marked with \u{1} in the item name)
+        for (name, model) in self.material_library() {
+            self.window.explorer_add(&name, if model { "Material (model)" } else { "Material" }, "");
+            self.explorer_items.push((format!("\u{1}{name}"), false));
+        }
+        self.mat_lib_key = self.material_library();
         for (f, size) in files {
             let kind = match Path::new(&f).extension().map(|e| e.to_string_lossy().to_lowercase()).as_deref() {
                 Some("polystation" | "gpr") => "Project",
@@ -1995,12 +2269,29 @@ impl App {
             self.explorer_items.push((f, false));
         }
         self.window.set_text(win32::ST_EXPLORER_PATH, &self.explorer_dir.to_string_lossy());
+        if let Some(sel) = &self.sel_mat {
+            let marked = format!("\u{1}{sel}");
+            if let Some(row) = self.explorer_items.iter().position(|(n, _)| *n == marked) {
+                self.window.explorer_select(row);
+            }
+        }
     }
 
     /// Double-click on a row: enter a folder, open a project, import a model, or use an image as a texture.
     fn explorer_activate(&mut self) {
         let Some(row) = self.window.explorer_selected() else { return };
         let Some((name, is_dir)) = self.explorer_items.get(row).cloned() else { return };
+        if let Some(mat) = name.strip_prefix('\u{1}') {
+            // a material: give it to the selected objects
+            let objs = self.selected_objects();
+            self.sel_mat = Some(mat.to_string());
+            if objs.is_empty() {
+                self.details_dirty = true;
+            } else {
+                self.assign_material(&objs, Some(mat.to_string()));
+            }
+            return;
+        }
         if is_dir {
             if name == ".." {
                 self.explorer_dir.pop();
@@ -2026,8 +2317,8 @@ impl App {
         if objs.is_empty() {
             return self.status_note("Select an object (or a particle system) first, then pick a texture");
         }
-        if Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("bmp")) {
-            self.set_texture(&objs, Some(path.to_string()));
+        if image::supported(path) {
+            self.set_texture(&objs, Some(path.to_string())); // PNG, JPEG, TGA and BMP load directly
             return;
         }
         self.status_note("Converting the image with Blender ...");
@@ -2082,7 +2373,7 @@ impl App {
             if path == trees::PALETTE {
                 self.utex_cache.entry(path.clone()).or_insert_with(trees::palette); // not a file: made by the engine
             } else if !self.utex_cache.contains_key(&path) {
-                match atlas::Atlas::load_bmp(&path) {
+                match image::load(&path) {
                     Ok(a) => {
                         self.utex_cache.insert(path.clone(), a);
                     }
@@ -2209,7 +2500,7 @@ impl App {
         let multi = self.ex.multi.len() > 1;
         for (i, &h) in self.ex.handles.iter().enumerate() {
             if h != 0 {
-                self.window.tree_set_bold(h, multi && self.ex.multi.contains(&i));
+                self.window.tree_set_bold(h, multi && self.ex.multi.contains(&i)); // drawn as a selection
             }
         }
     }
@@ -2287,7 +2578,7 @@ impl App {
     fn ray(&self, mx: i32, my: i32) -> ([f32; 3], [f32; 3]) {
         let (w, h) = self.window.size();
         let (w, h) = (w.max(1) as f32, h.max(1) as f32);
-        let t = (60f32.to_radians() * 0.5).tan();
+        let t = (self.settings.editor_fov.to_radians() * 0.5).tan();
         let (nx, ny) = (2.0 * mx as f32 / w - 1.0, 1.0 - 2.0 * my as f32 / h);
         let (f, r) = (self.cam.forward(), self.cam.right());
         let u = math::cross(r, f);
@@ -2300,7 +2591,112 @@ impl App {
     }
 
     /// Nearest visible object under a canvas pixel (CPU ray cast against every triangle).
+    /// Camera objects have no model: they are picked by their icon.
+    fn pick_camera_icon(&self, mx: i32, my: i32) -> Option<usize> {
+        let nb = self.base.nodes.len();
+        let (w, h) = self.window.size();
+        let reach = 20.0 * win32::dpi_scale();
+        self.edits.extras.iter().enumerate().filter(|(_, e)| e.prim == prims::Prim::Camera).filter_map(|(j, _)| {
+            let i = nb + 2 + j;
+            let visible = self.ex.checked[i] && !self.rt.deleted[i];
+            let p = self.project_to(self.rt.xf[i].pos, w as f32, h as f32)?;
+            let d = (p.0 - mx as f32).hypot(p.1 - my as f32);
+            (visible && d < reach).then_some((i, d))
+        }).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(i, _)| i)
+    }
+
+    /// First surface of the scene under a pixel, ignoring `exclude` (the objects being dragged):
+    /// (distance along the ray, surface normal).
+    fn ray_scene(&self, o: [f32; 3], d: [f32; 3], exclude: &HashSet<usize>) -> Option<(f32, [f32; 3])> {
+        let fwd: Vec<Option<(math::Mat4, math::Mat4)>> = self
+            .mesh
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let ok = n.kind == obj::Kind::Object && self.ex.checked[i] && !self.rt.deleted[i] && !exclude.contains(&i);
+                ok.then(|| {
+                    let x = &self.rt.xf[i];
+                    (math::inverse_model_matrix(x.pos, x.rot, x.scale, n.center), math::model_matrix(x.pos, x.rot, x.scale, n.center))
+                })
+            })
+            .collect();
+        let (data, mut best) = (&self.mesh.data, None::<(f32, [f32; 3])>);
+        for t in self.mesh.indices.chunks_exact(3) {
+            let id = self.mesh.object_of(data[t[0] as usize * obj::FLOATS + obj::FLOATS - 1] as usize);
+            let Some((inv, model)) = &fwd[id] else { continue };
+            let v = |k: usize| {
+                let b = t[k] as usize * obj::FLOATS;
+                [data[b], data[b + 1], data[b + 2]]
+            };
+            if let Some(tt) = math::ray_triangle(math::transform_point(inv, o), math::transform_dir(inv, d), v(0), v(1), v(2)) {
+                if best.is_none_or(|b| tt < b.0) {
+                    let (a, b, c) = (math::transform_point(model, v(0)), math::transform_point(model, v(1)), math::transform_point(model, v(2)));
+                    let mut n = math::normalize(math::cross(math::sub(b, a), math::sub(c, a)));
+                    if math::dot(n, d) > 0.0 {
+                        n = [-n[0], -n[1], -n[2]]; // face the viewer
+                    }
+                    best = Some((tt, n));
+                }
+            }
+        }
+        best
+    }
+
+    /// Starts dragging the selected objects over the scene's surfaces (pressing on one of them).
+    fn begin_surface_drag(&mut self, p: (i32, i32), primary: usize) {
+        let items: Vec<(usize, Xform)> = self.gizmo_targets_any().into_iter().map(|i| (i, self.rt.xf[i])).collect();
+        if items.is_empty() {
+            return;
+        }
+        // everything that belongs to a dragged object is ignored by the surface ray (so it never lands on itself)
+        let exclude: HashSet<usize> = (0..self.mesh.nodes.len()).filter(|&j| items.iter().any(|(i, _)| hier::is_ancestor_or_self(&self.mesh.nodes, *i, j))).collect();
+        let mut min_y = f32::MAX;
+        for v in self.mesh.data.chunks_exact(obj::FLOATS) {
+            let id = v[obj::FLOATS - 1] as usize;
+            if id == primary || hier::is_ancestor_or_self(&self.mesh.nodes, primary, id) {
+                let x = &self.rt.xf[id];
+                let w = math::transform_point(&math::model_matrix(x.pos, x.rot, x.scale, self.mesh.nodes[id].center), [v[0], v[1], v[2]]);
+                min_y = min_y.min(w[1]);
+            }
+        }
+        let pos_y = self.rt.xf[primary].pos[1];
+        let bottom = if min_y < f32::MAX { (pos_y - min_y).max(0.0) } else { 0.0 };
+        self.surf = Some(SurfDrag { start: p, moved: false, items, primary, bottom, exclude });
+    }
+
+    /// The objects the surface drag moves: every selected, visible object.
+    fn gizmo_targets_any(&self) -> Vec<usize> {
+        self.ex.multi.iter().copied().filter(|&i| self.is_selectable_object(i)).collect()
+    }
+
+    fn update_surface_drag(&mut self, mouse: (i32, i32)) {
+        let Some(sd) = &self.surf else { return };
+        if !sd.moved && (mouse.0 - sd.start.0).abs().max((mouse.1 - sd.start.1).abs()) < 5 {
+            return;
+        }
+        let (items, primary, bottom, exclude) = (sd.items.clone(), sd.primary, sd.bottom, sd.exclude.clone());
+        if !sd.moved {
+            self.push_undo(); // one undo step for the whole drag
+        }
+        if let Some(sd) = &mut self.surf {
+            sd.moved = true;
+        }
+        let (o, d) = self.ray(mouse.0, mouse.1);
+        let Some((t, _n)) = self.ray_scene(o, d, &exclude) else { return };
+        let hit = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
+        let start = items.iter().find(|(i, _)| *i == primary).map_or([0.0; 3], |(_, x)| x.pos);
+        let target = [hit[0], hit[1] + bottom, hit[2]];
+        let delta = [target[0] - start[0], target[1] - start[1], target[2] - start[2]];
+        let list: Vec<(usize, Xform)> = items.iter().map(|(i, x)| (*i, Xform { pos: [x.pos[0] + delta[0], x.pos[1] + delta[1], x.pos[2] + delta[2]], ..*x })).collect();
+        self.set_xforms(&list);
+        self.details_dirty = true;
+    }
+
     fn pick(&self, mx: i32, my: i32) -> Option<usize> {
+        if let Some(i) = self.pick_camera_icon(mx, my) {
+            return Some(i);
+        }
         let (o, d) = self.ray(mx, my);
         let inv: Vec<Option<math::Mat4>> = self
             .mesh
@@ -2317,7 +2713,7 @@ impl App {
             .collect();
         let (data, mut best, mut hit) = (&self.mesh.data, f32::MAX, None);
         for t in self.mesh.indices.chunks_exact(3) {
-            let id = data[t[0] as usize * obj::FLOATS + obj::FLOATS - 1] as usize;
+            let id = self.mesh.object_of(data[t[0] as usize * obj::FLOATS + obj::FLOATS - 1] as usize);
             let Some(m) = &inv[id] else { continue };
             let v = |k: usize| {
                 let b = t[k] as usize * obj::FLOATS;
@@ -2443,10 +2839,16 @@ impl App {
     }
 
     /// Direction of the axis ball under canvas pixel (px, py), if any (the nearest one wins).
+    /// True when a point (canvas pixels) is on the orientation widget's plate.
+    fn compass_inside(&self, px: f32, py: f32) -> bool {
+        let (x0, y0, s) = self.compass_rect();
+        (px - (x0 + s * 0.5)).hypot(py - (y0 + s * 0.5)) < s * 0.5
+    }
+
     fn compass_hit(&self, px: f32, py: f32) -> Option<[f32; 3]> {
         let (x0, y0, s) = self.compass_rect();
         let (nx, ny) = ((px - x0) / s * 2.0 - 1.0, 1.0 - (py - y0) / s * 2.0);
-        self.compass_balls().iter().rev().find(|b| (nx - b.x).hypot(ny - b.y) < b.r * 1.25).map(|b| b.dir)
+        self.compass_balls().iter().rev().find(|b| (nx - b.x * 1.2).hypot(ny - b.y * 1.2) < b.r * 1.5).map(|b| b.dir)
     }
 
     /// Snap the camera to look along an axis (from the +/- side the clicked ball is on), keeping the distance.
@@ -2463,41 +2865,111 @@ impl App {
         self.cam.pos = math::sub(focus, mul3(nf, d));
     }
 
-    /// Draws the orientation widget with the UI renderer: smooth discs, a thin axis line to each
-    /// positive end and the axis letter in the UI font. `vp` is the 3D view in window pixels.
+    /// Camera objects are drawn as billboard icons (always facing the viewer) with a short line showing
+    /// where they look.
+    fn draw_camera_icons(&self, c: &mut ui::style::Ctx, vp: [f32; 4]) {
+        let nb = self.base.nodes.len();
+        let s = win32::dpi_scale();
+        c.r.push_clip(vp[0], vp[1], vp[2], vp[3]);
+        for (j, e) in self.edits.extras.iter().enumerate() {
+            let i = nb + 2 + j;
+            if e.prim != prims::Prim::Camera || !self.ex.checked[i] || self.rt.deleted[i] {
+                continue;
+            }
+            let x = self.rt.xf[i];
+            let Some(p) = self.project_to(x.pos, vp[2], vp[3]) else { continue };
+            let (px, py) = (vp[0] + p.0, vp[1] + p.1);
+            let selected = self.ex.multi.contains(&i);
+            // where it looks
+            let f = math::transform_dir(&math::rot_matrix(x.rot), [0.0, 0.0, -1.0]);
+            let tip = [x.pos[0] + f[0] * 1.6, x.pos[1] + f[1] * 1.6, x.pos[2] + f[2] * 1.6];
+            if let Some(t) = self.project_to(tip, vp[2], vp[3]) {
+                let (tx, ty) = (vp[0] + t.0, vp[1] + t.1);
+                c.r.line(px, py, tx, ty, 3.0 * s, [0.0, 0.0, 0.0, 0.5]);
+                c.r.line(px, py, tx, ty, 1.6 * s, [1.0, 0.82, 0.3, 0.95]);
+                c.r.circle(tx, ty, 3.2 * s, [1.0, 0.82, 0.3, 1.0], 0.0, [0.0; 4]);
+            }
+            let (w, h) = (34.0 * s, 24.0 * s);
+            let body = [px - w * 0.5, py - h * 0.5, w, h];
+            let ink = [0.1, 0.1, 0.14, 1.0];
+            let paint = if selected { [1.0, 0.82, 0.3, 1.0] } else { [0.93, 0.94, 0.98, 1.0] };
+            c.r.circle(body[0] + w * 0.28, body[1] - h * 0.18, h * 0.3, ink, 0.0, [0.0; 4]); // film reels
+            c.r.circle(body[0] + w * 0.28, body[1] - h * 0.18, h * 0.22, paint, 0.0, [0.0; 4]);
+            c.r.circle(body[0] + w * 0.62, body[1] - h * 0.14, h * 0.26, ink, 0.0, [0.0; 4]);
+            c.r.circle(body[0] + w * 0.62, body[1] - h * 0.14, h * 0.18, paint, 0.0, [0.0; 4]);
+            c.r.rect(body[0] - 1.5 * s, body[1] - 1.5 * s, w + 3.0 * s, h + 3.0 * s, 6.0 * s, ink, 0.0, ink);
+            c.r.rect(body[0], body[1], w * 0.74, h, 5.0 * s, paint, 0.0, paint);
+            // the lens
+            c.r.rect(body[0] + w * 0.7, body[1] + h * 0.18, w * 0.3, h * 0.64, 3.0 * s, ink, 0.0, ink);
+            c.r.circle(body[0] + w * 0.28, body[1] + h * 0.5, h * 0.2, ink, 0.0, [0.0; 4]);
+            c.r.circle(body[0] + w * 0.28, body[1] + h * 0.5, h * 0.1, [0.4, 0.75, 1.0, 1.0], 0.0, [0.0; 4]);
+            let name = c.f.ui.measure(&e.name);
+            let label = if self.edits.game_camera.as_deref() == Some(e.name.as_str()) { format!("{} (game camera)", e.name) } else { e.name.clone() };
+            let name = c.f.ui.measure(&label).max(name);
+            c.text_in(&c.f.ui, &label, px - name * 0.5, py + h * 0.5 + 4.0 * s, 18.0 * s, [1.0, 1.0, 1.0, 0.85]);
+        }
+        c.r.pop_clip();
+    }
+
+    /// Draws the orientation widget: a round plate that lights up under the mouse, thick axis arms drawn
+    /// back to front with the nearer ones on top, coloured X / Y / Z balls at the positive ends, hollow
+    /// rings at the negative ends, a hover highlight, and the name of the view when it looks along an axis.
     fn draw_compass(&self, c: &mut ui::style::Ctx, vp: [f32; 4]) {
         if self.play.is_some() {
             return;
         }
         // (the window is mutably borrowed while the UI draws: size comes from `vp`, not from `window.size()`)
-        let size = COMPASS_SIZE * win32::dpi_scale();
-        let (x0, y0) = (vp[2] - size - COMPASS_MARGIN * win32::dpi_scale(), COMPASS_MARGIN * win32::dpi_scale());
+        let s = win32::dpi_scale();
+        let size = COMPASS_SIZE * s;
+        let (x0, y0) = (vp[2] - size - COMPASS_MARGIN * s, COMPASS_MARGIN * s);
         let half = size * 0.5;
         let (cx, cy) = (vp[0] + x0 + half, vp[1] + y0 + half);
-        let s = win32::dpi_scale();
+        let mouse = (vp[0] + self.gui_mouse.0, vp[1] + self.gui_mouse.1);
+        let over = (mouse.0 - cx).hypot(mouse.1 - cy) < half;
         c.r.push_clip(vp[0], vp[1], vp[2], vp[3]);
-        c.r.circle(cx, cy, half * 0.97, [0.07, 0.08, 0.10, 0.55], 1.0 * s, [1.0, 1.0, 1.0, 0.10]);
-        let col = |k: usize| [AXIS_COLORS[k][0], AXIS_COLORS[k][1], AXIS_COLORS[k][2], 1.0];
-        for b in self.compass_balls() {
-            let (bx, by) = (cx + b.x * half, cy - b.y * half);
-            // farther ends fade a little, so the order in depth reads at a glance
-            let fade = 1.0 - 0.28 * (b.depth * 0.5 + 0.5).clamp(0.0, 1.0);
-            let base = col(b.axis);
+        // the plate: faint, and brighter while the mouse is over the widget
+        c.r.circle(cx, cy, half * 0.98, [0.08, 0.09, 0.12, if over { 0.62 } else { 0.32 }], 1.0 * s, [1.0, 1.0, 1.0, if over { 0.22 } else { 0.08 }]);
+        let balls = self.compass_balls();
+        let hot = if over { balls.iter().rev().position(|b| ((mouse.0 - (cx + b.x * half * 1.2)).hypot(mouse.1 - (cy - b.y * half * 1.2))) < b.r * half * 1.9).map(|i| balls.len() - 1 - i) } else { None };
+        let reach = 1.2; // the arms use the plate: ends sit at 72% of its radius
+        let col = |k: usize, f: f32, a: f32| [AXIS_COLORS[k][0] * f, AXIS_COLORS[k][1] * f, AXIS_COLORS[k][2] * f, a];
+        for (i, b) in balls.iter().enumerate() {
+            let (bx, by) = (cx + b.x * half * reach, cy - b.y * half * reach);
+            // farther ends are a little darker, so the order in depth reads at a glance
+            let near = (1.0 - (b.depth * 0.5 + 0.5)).clamp(0.0, 1.0);
+            let fade = 0.62 + 0.38 * near;
+            let lit = hot == Some(i);
             if b.positive {
-                let line = [base[0] * fade, base[1] * fade, base[2] * fade, 0.85];
-                c.r.line(cx, cy, bx, by, 1.6 * s, line);
-                let r = b.r * half * 1.28;
-                let fill = [base[0] * fade, base[1] * fade, base[2] * fade, 1.0];
-                c.r.circle(bx, by, r, fill, 1.2 * s, [1.0, 1.0, 1.0, 0.55 * fade]);
-                let letter = ["X", "Y", "Z"][b.axis];
+                // the arm: a dark outline under a coloured line
+                c.r.line(cx, cy, bx, by, 4.2 * s, [0.0, 0.0, 0.0, 0.45]);
+                c.r.line(cx, cy, bx, by, 2.6 * s, col(b.axis, fade, 1.0));
+                let r = b.r * half * (if lit { 1.62 } else { 1.45 });
+                c.r.circle(bx, by, r + 1.5 * s, [0.0, 0.0, 0.0, 0.5], 0.0, [0.0; 4]);
+                let f = if lit { 1.25 } else { fade };
+                let mut fill = col(b.axis, f.min(1.0), 1.0);
+                if lit {
+                    for k in 0..3 {
+                        fill[k] = (fill[k] + 0.25).min(1.0);
+                    }
+                }
+                c.r.circle(bx, by, r, fill, 1.4 * s, [1.0, 1.0, 1.0, 0.7 * fade]);
+                // the letter, with a soft shadow so it reads on every colour
                 let font = &c.f.bold;
-                c.text_center(font, letter, bx - r, by - r, r * 2.0, r * 2.0, [0.05, 0.06, 0.09, 1.0]);
+                let letter = ["X", "Y", "Z"][b.axis];
+                c.text_center(font, letter, bx - r + 1.0, by - r + 1.0, r * 2.0, r * 2.0, [0.0, 0.0, 0.0, 0.35]);
+                c.text_center(font, letter, bx - r, by - r, r * 2.0, r * 2.0, [1.0, 1.0, 1.0, 1.0]);
             } else {
-                let r = b.r * half * 1.1;
-                let fill = [base[0] * 0.35 * fade, base[1] * 0.35 * fade, base[2] * 0.35 * fade, 0.95];
-                c.r.circle(bx, by, r, fill, 1.2 * s, [base[0], base[1], base[2], 0.75 * fade]);
+                let r = b.r * half * (if lit { 1.45 } else { 1.2 });
+                c.r.circle(bx, by, r, col(b.axis, 0.28 * fade, if lit { 0.95 } else { 0.7 }), 1.8 * s, col(b.axis, if lit { 1.1 } else { 0.9 * fade }, 1.0));
             }
         }
+        c.r.circle(cx, cy, 3.2 * s, [0.92, 0.93, 0.96, 0.9], 0.0, [0.0; 4]);
+        // the name of the view, when the camera looks straight along an axis
+        let f = self.cam.forward();
+        let name = [(0usize, 1.0f32, "Left"), (0, -1.0, "Right"), (1, 1.0, "Bottom"), (1, -1.0, "Top"), (2, 1.0, "Back"), (2, -1.0, "Front")].iter().find(|(a, sg, _)| f[*a] * sg > 0.995).map_or("Perspective", |t| t.2);
+        let font = &c.f.ui;
+        let w = font.measure(name);
+        c.text_in(font, name, cx - w * 0.5, cy + half + 2.0 * s, 20.0 * s, [0.85, 0.87, 0.92, if over { 0.95 } else { 0.6 }]);
         c.r.pop_clip();
     }
 
@@ -2528,6 +3000,12 @@ impl App {
 
     /// World point to canvas pixel, using the previous frame's matrices.
     fn project(&self, p: [f32; 3]) -> Option<(f32, f32)> {
+        let (cw, ch) = self.window.size();
+        self.project_to(p, cw as f32, ch as f32)
+    }
+
+    /// World point to pixel of a view `cw` x `ch` (usable while the UI draws, when the window is borrowed).
+    fn project_to(&self, p: [f32; 3], cw: f32, ch: f32) -> Option<(f32, f32)> {
         let m = &self.last_mvp;
         let w = m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15];
         if w <= 1e-6 {
@@ -2535,8 +3013,7 @@ impl App {
         }
         let x = (m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12]) / w;
         let y = (m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13]) / w;
-        let (cw, ch) = self.window.size();
-        Some(((x * 0.5 + 0.5) * cw as f32, (0.5 - y * 0.5) * ch as f32))
+        Some(((x * 0.5 + 0.5) * cw, (0.5 - y * 0.5) * ch))
     }
 
     fn gizmo_hit(&self, mx: i32, my: i32) -> Option<Handle> {
@@ -2861,6 +3338,10 @@ impl App {
             .enumerate()
             .map(|(i, t)| M::new(win32::CMD_GIZMO_BASE + i as u16, t).checked(self.gizmo.index() as usize == i))
             .collect();
+        let selected_camera = self.ex.selected.and_then(|s| match node_ref(nb, s) {
+            NodeRef::Extra(j) if self.edits.extras[j].prim == prims::Prim::Camera => Some(self.edits.extras[j].name.clone()),
+            _ => None,
+        });
         let mut v = vec![
             M::new(0, &name).enabled(false),
             M::sep(),
@@ -2871,15 +3352,21 @@ impl App {
             M::sep(),
             M::submenu("Gizmo", tools),
             M::new(win32::CMD_RESET_XFORM, "Reset Transform"),
-            M::new(win32::CMD_CLEAR_COLOR, "Clear Color"),
-            M::new(win32::CMD_TEXTURE_SET, "Set Texture..."),
-            M::new(win32::CMD_TEXTURE_CLEAR, "Clear Texture"),
-            M::sep(),
-            M::submenu("Collision", scene::Collision::NAMES.iter().enumerate().map(|(i, n)| M::new(win32::CMD_COLL_BASE + i as u16, n).checked(self.selected_name().is_some_and(|s| self.edits.collision_of(&s).index() == i))).collect()),
-            M::new(win32::CMD_SCRIPT_ADD, if has_script { "Edit Script" } else { "Add Script" }),
         ];
+        if selected_camera.is_none() {
+            v.push(M::new(win32::CMD_CLEAR_COLOR, "Clear Color"));
+            v.push(M::new(win32::CMD_TEXTURE_SET, "Set Texture..."));
+            v.push(M::new(win32::CMD_TEXTURE_CLEAR, "Clear Texture"));
+            v.push(M::sep());
+            v.push(M::submenu("Collision", scene::Collision::NAMES.iter().enumerate().map(|(i, n)| M::new(win32::CMD_COLL_BASE + i as u16, n).checked(self.selected_name().is_some_and(|s| self.edits.collision_of(&s).index() == i))).collect()));
+        }
+        v.push(M::new(win32::CMD_SCRIPT_ADD, if has_script { "Edit Script" } else { "Add Script" }));
         if has_script {
             v.push(M::new(win32::CMD_SCRIPT_REMOVE, "Remove Script"));
+        }
+        if let Some(cam) = selected_camera {
+            v.push(M::sep());
+            v.push(M::new(win32::CMD_GAME_CAMERA, "Set as Scene Camera").checked(self.edits.game_camera.as_deref() == Some(cam.as_str())));
         }
         v.push(M::sep());
         v.push(M::submenu("Add", self.add_menu()));
@@ -2909,6 +3396,21 @@ impl App {
     fn explorer_menu(&self) -> Vec<win32::MenuItem> {
         use win32::MenuItem as M;
         let sel = self.window.explorer_selected().and_then(|r| self.explorer_items.get(r)).cloned();
+        if let Some((n, _)) = &sel {
+            if let Some(mat) = n.strip_prefix('\u{1}') {
+                let model = self.is_model_material(mat);
+                let edited = self.edits.materials.get(mat).is_some_and(|e| !e.is_empty());
+                return vec![
+                    M::new(win32::CMD_MAT_ASSIGN, "Assign to Selected Object").enabled(!self.selected_objects().is_empty()),
+                    M::sep(),
+                    M::new(win32::CMD_MAT_DUP, "Duplicate"),
+                    M::new(win32::CMD_MAT_RESET, if model { "Reset to Blender" } else { "Reset to Default" }).enabled(edited),
+                    M::new(win32::CMD_MAT_DELETE, "Delete").enabled(!model),
+                    M::sep(),
+                    M::new(win32::CMD_MAT_NEW, "New Material"),
+                ];
+            }
+        }
         let label = match &sel {
             Some((n, true)) if n == ".." => "Go Up",
             Some((_, true)) => "Open Folder",
@@ -2917,7 +3419,7 @@ impl App {
             Some(_) => "Use as Texture",
             None => "Open",
         };
-        vec![M::new(win32::CMD_EXPLORER_OPEN, label).enabled(sel.is_some()), M::sep(), M::new(win32::CMD_EXPLORER_UP, "Up one Folder"), M::new(win32::CMD_EXPLORER_REFRESH, "Refresh")]
+        vec![M::new(win32::CMD_EXPLORER_OPEN, label).enabled(sel.is_some()), M::sep(), M::new(win32::CMD_MAT_NEW, "New Material"), M::sep(), M::new(win32::CMD_EXPLORER_UP, "Up one Folder"), M::new(win32::CMD_EXPLORER_REFRESH, "Refresh")]
     }
 
     /// Right click (without dragging) on the 3D view: menu for the object under the cursor, or for empty space.
@@ -3133,6 +3635,9 @@ impl App {
         for (i, n) in self.mesh.nodes.iter().enumerate() {
             if self.ex.handles.get(i).is_some_and(|&h| h != 0) {
                 self.window.tree_set_badge(self.ex.handles[i], n.kind == obj::Kind::Object && self.edits.scripts.get(&n.name).is_some_and(|s| !s.trim().is_empty()));
+                // the camera the game looks through is tagged
+                let scene_camera = self.edits.game_camera.as_deref() == Some(n.name.as_str()) && matches!(node_ref(self.base.nodes.len(), i), NodeRef::Extra(j) if self.edits.extras[j].prim == prims::Prim::Camera);
+                self.window.tree_set_mark(self.ex.handles[i], scene_camera);
             }
         }
     }
@@ -3313,6 +3818,36 @@ impl App {
         }
     }
 
+    /// Moves several nodes at once (one undo step). They keep their order; each lands at `place` after the previous.
+    fn reparent_many(&mut self, nodes: &[usize], place: hier::Place) -> bool {
+        if self.play.is_some() || nodes.is_empty() {
+            return false;
+        }
+        let mut hier_list = self.edits.hier.clone();
+        let mut cur = self.mesh.nodes.clone();
+        let (base, nb) = (self.base.nodes.clone(), self.base.nodes.len());
+        let mut moved_any = false;
+        // for "after" and "first" the group is placed back to front so it ends up in its original order
+        let seq: Vec<usize> = if matches!(place, hier::Place::After(_) | hier::Place::First(_)) { nodes.iter().rev().copied().collect() } else { nodes.to_vec() };
+        for n in seq {
+            if n == nb + 1 {
+                continue;
+            }
+            if let Some(h) = hier::moved(&cur, &hier_list, n, place) {
+                hier_list = h;
+                hier::apply(&mut cur, &base, &hier_list);
+                moved_any = true;
+            }
+        }
+        if !moved_any || hier_list == self.edits.hier {
+            return false;
+        }
+        self.push_undo();
+        self.edits.hier = hier_list;
+        self.refresh();
+        true
+    }
+
     /// Drag and drop in the explorer: puts `node` at `place`. Returns false when that is not allowed.
     fn reparent(&mut self, node: usize, place: hier::Place) -> bool {
         if self.play.is_some() || node == self.base.nodes.len() + 1 {
@@ -3391,7 +3926,7 @@ impl App {
             .collect();
         let (data, mut tris) = (&self.mesh.data, Vec::new());
         for t in self.mesh.indices.chunks_exact(3) {
-            let id = data[t[0] as usize * obj::FLOATS + obj::FLOATS - 1] as usize;
+            let id = self.mesh.object_of(data[t[0] as usize * obj::FLOATS + obj::FLOATS - 1] as usize);
             let Some(m) = &solid[id] else { continue };
             let v = |k: usize| {
                 let b = t[k] as usize * obj::FLOATS;
@@ -3420,7 +3955,7 @@ impl App {
         let mut boxes: HashMap<usize, [f32; 6]> = HashMap::new();
         let data = &self.mesh.data;
         for t in self.mesh.indices.chunks_exact(3) {
-            let id = data[t[0] as usize * obj::FLOATS + obj::FLOATS - 1] as usize;
+            let id = self.mesh.object_of(data[t[0] as usize * obj::FLOATS + obj::FLOATS - 1] as usize);
             let Some(m) = &mats[id] else { continue };
             let b = boxes.entry(id).or_insert([f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN]);
             for k in 0..3 {
@@ -3510,8 +4045,9 @@ impl App {
             self.window.look_end();
         }
         self.window.set_playing(true);
-        self.window.look_begin();
+        self.window.look_begin_centered(); // the pointer starts in the middle of the game screen
         self.look_active = true;
+        self.play_camera = self.edits.game_camera.clone().filter(|n| self.edits.extras.iter().any(|e| e.prim == prims::Prim::Camera && &e.name == n));
         self.cursor_free = false;
         self.cursor_override = None;
         self.tab_free = false;
@@ -3530,7 +4066,9 @@ impl App {
     fn stop_play(&mut self) {
         let Some(ps) = self.play.take() else { return };
         self.window.stop_sound();
+        self.window.reset_game_mouse();
         self.window.set_playing(false);
+        self.play_camera = None;
         self.cursor_free = false;
         self.cursor_override = None;
         self.tab_free = false;
@@ -3630,6 +4168,12 @@ impl App {
             ps.walker = play::Walker::new(ps.spawn); // fell out of the world
         }
         self.cam = Cam { yaw: ps.yaw, pitch: ps.pitch, pos: ps.walker.eye(&ps.params) };
+        // a script asked to look through a camera object
+        if let Some(i) = self.play_camera.as_ref().and_then(|n| self.mesh.nodes.iter().position(|m| &m.name == n)) {
+            let x = self.script_xform(i);
+            let f = math::transform_dir(&math::rot_matrix(x.rot), [0.0, 0.0, -1.0]);
+            self.cam = Cam { yaw: f[0].atan2(-f[2]), pitch: f[1].clamp(-1.0, 1.0).asin(), pos: x.pos };
+        }
         self.play = Some(ps);
     }
 
@@ -3673,6 +4217,7 @@ impl App {
     /// Draws on top of the 3D view: the orientation widget in the editor, the HUD text in a compiled game.
     fn draw_overlay(&self, c: &mut ui::style::Ctx, vp: [f32; 4]) {
         if self.play.is_none() && !self.game_mode {
+            self.draw_camera_icons(c, vp);
             self.draw_compass(c, vp);
             return;
         }
@@ -3824,6 +4369,84 @@ impl App {
             win32::CMD_SCREENSHOT => self.shot = self.window.file_dialog(true, &BMP_FILTER, "bmp", "screenshot.bmp"),
             win32::CMD_EXIT => return true,
             win32::CMD_SETTINGS => self.open_settings(),
+            win32::CMD_MAT_COLOR => {
+                if let Some(name) = self.current_material() {
+                    let init = self.material_view(&name).color.unwrap_or([0.8, 0.8, 0.8]);
+                    if let Some(c) = self.window.choose_color(init) {
+                        self.edit_material(|m| m.color = Some(c));
+                    }
+                }
+            }
+            win32::CMD_MAT_NEW => self.new_material(None),
+            win32::CMD_MAT_DUP => {
+                if let Some(n) = self.current_material() {
+                    self.new_material(Some(&n));
+                }
+            }
+            win32::CMD_MAT_DELETE => self.delete_material(),
+            win32::CMD_MAT_ASSIGN => {
+                if let Some(n) = self.current_material() {
+                    let objs = self.selected_objects();
+                    self.assign_material(&objs, Some(n));
+                }
+            }
+            win32::CMD_OBJ_MAT_EDIT => {
+                let assigned = self.selected_name().and_then(|n| self.edits.assign.get(&n).cloned());
+                if assigned.is_some() {
+                    self.sel_mat = assigned;
+                    self.details_dirty = true;
+                    self.explorer_refresh();
+                }
+            }
+            win32::CMD_MAT_BACK => {
+                let on = self.window.is_checked(win32::CMD_MAT_BACK);
+                self.edit_material(|m| m.back_cull = Some(on));
+            }
+            win32::CMD_MAT_NOFOG => {
+                let on = self.window.is_checked(win32::CMD_MAT_NOFOG);
+                self.edit_material(|m| m.no_fog = Some(on));
+            }
+            win32::CMD_MAT_CLEAR_COLOR => self.edit_material(|m| m.color = None),
+            win32::CMD_MAT_TEXTURE => {
+                if self.current_material().is_some() {
+                    if let Some(path) = self.window.file_dialog(false, &IMAGE_FILTER, "", "") {
+                        if image::supported(&path) {
+                            self.edit_material(|m| m.texture = Some(path));
+                        } else {
+                            self.window.message("Use a PNG, JPEG, TGA or BMP image for a material.");
+                        }
+                    }
+                }
+            }
+            win32::CMD_MAT_CLEAR_TEXTURE => self.edit_material(|m| m.texture = None),
+            win32::CMD_MAT_RESET => self.reset_material(),
+            c if (win32::CMD_MATMODE_BASE..win32::CMD_MATMODE_BASE + 4).contains(&c) => {
+                let mode = scene::TexMode::from_index((c - win32::CMD_MATMODE_BASE) as usize);
+                self.edit_material(|m| m.mode = Some(mode));
+            }
+            c if (win32::CMD_MATCAM_BASE..win32::CMD_MATCAM_BASE + 9).contains(&c) => {
+                let k = (c - win32::CMD_MATCAM_BASE) as usize;
+                let cam = if k == 0 { None } else { self.camera_names().get(k - 1).cloned() };
+                self.edit_material(|m| m.camera = cam);
+            }
+            win32::CMD_GAME_CAMERA => {
+                let nb = self.base.nodes.len();
+                if let Some(name) = self.ex.selected.and_then(|s| match node_ref(nb, s) {
+                    NodeRef::Extra(j) if self.edits.extras[j].prim == prims::Prim::Camera => Some(self.edits.extras[j].name.clone()),
+                    _ => None,
+                }) {
+                    self.push_undo();
+                    if self.edits.game_camera.as_deref() == Some(name.as_str()) {
+                        self.edits.game_camera = None;
+                        self.status_note("The game looks through the player again");
+                    } else {
+                        self.status_note(&format!("{name} is the scene camera: the game starts looking through it"));
+                        self.edits.game_camera = Some(name);
+                    }
+                    self.sync_script_badges();
+                    self.details_dirty = true;
+                }
+            }
             win32::CMD_UNINSTALL => {
                 let setup = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("polystation-setup.exe")));
                 match setup.filter(|s| s.is_file()) {
@@ -4253,7 +4876,7 @@ Download it from the GitHub releases page to install and update."),
         for (i, n) in self.mesh.nodes.iter().enumerate().skip(1) {
             let ok = match node_ref(nb, i) {
                 NodeRef::Base => matches!(n.kind, obj::Kind::Object | obj::Kind::Collection),
-                NodeRef::Extra(j) => !matches!(self.edits.extras[j].prim, prims::Prim::Scatter | prims::Prim::Terrain | prims::Prim::Particles | prims::Prim::Light | prims::Prim::Player),
+                NodeRef::Extra(j) => !matches!(self.edits.extras[j].prim, prims::Prim::Scatter | prims::Prim::Terrain | prims::Prim::Particles | prims::Prim::Light | prims::Prim::Player | prims::Prim::Camera),
                 _ => false,
             };
             if ok {
@@ -4440,6 +5063,7 @@ Download it from the GitHub releases page to install and update."),
         self.mesh = scene::compose(&self.base, &self.edits.extras, &self.terrain_views);
         hier::apply(&mut self.mesh.nodes, &self.base.nodes, &self.edits.hier);
         self.rt = compute_runtime(self.base.nodes.len(), &self.mesh, &self.edits);
+        self.uv_boxes = self.mesh.uv_boxes();
         unsafe { upload_mesh(&self.g, self.vbo, self.ebo, self.wire_ebo, &self.mesh) };
         self.objects_dirty = true;
     }
@@ -4531,6 +5155,7 @@ Download it from the GitHub releases page to install and update."),
     /// Details panel contents while the Environment node is selected.
     fn refresh_env(&self) {
         let (w, e) = (&self.window, &self.edits.env);
+        w.combo_set(win32::CB_COLORBITS, &["4-bit (16 colors)", "8-bit (256 colors)", "16-bit (65k colors)", "32-bit (full color)"], [4u8, 8, 16, 32].iter().position(|&b| b == e.color_bits).unwrap_or(3));
         let hex = |c: [f32; 3]| format!("#{:02X}{:02X}{:02X}", (c[0] * 255.0 + 0.5) as u8, (c[1] * 255.0 + 0.5) as u8, (c[2] * 255.0 + 0.5) as u8);
         w.combo_set(win32::CB_FOG, &["Off", "Smooth", "Dithered"], e.fog as usize);
         w.set_text(win32::ED_FOG_START, &fmt_f(e.fog_start));
@@ -4576,6 +5201,16 @@ Download it from the GitHub releases page to install and update."),
         let objects = self.mesh.nodes.iter().enumerate().filter(|(i, n)| n.kind == obj::Kind::Object && !self.rt.deleted[*i]).count();
         let root = &self.mesh.nodes[0];
         let env_selected = self.ex.selected.is_some_and(|s| matches!(node_ref(nb, s), NodeRef::Env));
+        // a material of the hierarchy: its own panel instead of the object's
+        let mat_sel = self.current_material();
+        w.set_group_visible(13, mat_sel.is_some());
+        if mat_sel.is_some() {
+            for g in [1, 2, 3, 4, 5, 6, 11, 12, 14, 15] {
+                w.set_group_visible(g, false);
+            }
+            self.refresh_material();
+            return;
+        }
         let particles = if env_selected { None } else { self.particles_index() };
         let player = if env_selected { None } else { self.player_index() };
         let light = if env_selected { None } else { self.light_index() };
@@ -4584,7 +5219,11 @@ Download it from the GitHub releases page to install and update."),
         w.set_group_visible(6, player.is_some());
         w.set_group_visible(11, light.is_some());
         let scatter = if env_selected { None } else { self.scatter_index() };
-        w.set_group_visible(1, !env_selected && particles.is_none() && scatter.is_none() && player.is_none() && light.is_none() && tree.is_none());
+        let camera = if env_selected { None } else { self.camera_index() };
+        let object_panel = !env_selected && particles.is_none() && scatter.is_none() && player.is_none() && light.is_none() && tree.is_none();
+        w.set_group_visible(1, object_panel);
+        w.set_group_visible(15, object_panel && camera.is_none()); // the appearance, material and collision of an object: not for a camera
+        w.set_group_visible(14, camera.is_some());
         w.set_group_visible(2, env_selected);
         w.set_group_visible(4, particles.is_some());
         w.set_group_visible(5, scatter.is_some());
@@ -4684,11 +5323,347 @@ Download it from the GitHub releases page to install and update."),
         w.set_enabled(win32::CMD_DELETE, s != 0);
         w.combo_set(win32::CB_COLLISION, &scene::Collision::NAMES, self.edits.collision_of(&node.name).index());
         w.set_enabled(win32::CB_COLLISION, is_obj);
+        // the material of the object
+        let lib = self.material_library();
+        let mut items: Vec<&str> = vec!["(none)"];
+        items.extend(lib.iter().map(|(n, _)| n.as_str()));
+        let cur = self.edits.assign.get(&node.name).and_then(|m| lib.iter().position(|(n, _)| n == m)).map_or(0, |p| p + 1);
+        w.combo_set(win32::CB_OBJMAT, &items, cur);
+        w.set_enabled(win32::CB_OBJMAT, is_obj);
+        w.set_enabled(win32::CMD_OBJ_MAT_EDIT, is_obj && cur > 0);
+        if let Some(j) = camera {
+            self.refresh_camera(j);
+        }
+    }
+
+    fn camera_index(&self) -> Option<usize> {
+        let s = self.ex.selected?;
+        match node_ref(self.base.nodes.len(), s) {
+            NodeRef::Extra(j) if self.edits.extras[j].prim == prims::Prim::Camera => Some(j),
+            _ => None,
+        }
+    }
+
+    fn refresh_camera(&self, j: usize) {
+        let name = &self.edits.extras[j].name;
+        let is_scene = self.edits.game_camera.as_deref() == Some(name.as_str());
+        let w = &self.window;
+        w.set_text(win32::ST_CAMINFO, &format!("Camera: {name}\r\n{}", if is_scene { "This is the scene camera: the game starts looking through it." } else { "Not the scene camera: the game looks through the player." }));
+        w.set_text(win32::CMD_GAME_CAMERA, if is_scene { "Scene Camera (click to unset)" } else { "Set as Scene Camera" });
+    }
+
+    // ---------------------------------------------------------------- materials
+    /// The selected hierarchy row, when it is a material.
+    fn material_node(&self) -> Option<usize> {
+        self.ex.selected.filter(|&s| self.mesh.nodes.get(s).is_some_and(|n| n.kind == obj::Kind::Material))
+    }
+
+    /// Names of the Camera objects, in scene order.
+    fn camera_names(&self) -> Vec<String> {
+        self.edits.extras.iter().filter(|e| e.prim == prims::Prim::Camera).map(|e| e.name.clone()).collect()
+    }
+
+    /// Every material: those of the models (each name once), then the ones made in Polystation. True = from a model.
+    fn material_library(&self) -> Vec<(String, bool)> {
+        let mut out: Vec<(String, bool)> = Vec::new();
+        for n in &self.mesh.nodes {
+            if n.kind == obj::Kind::Material {
+                if let Some(name) = n.material_name() {
+                    if !out.iter().any(|(x, _)| x == name) {
+                        out.push((name.to_string(), true));
+                    }
+                }
+            }
+        }
+        for m in &self.edits.user_materials {
+            if !out.iter().any(|(x, _)| x == m) {
+                out.push((m.clone(), false));
+            }
+        }
+        out
+    }
+
+    fn is_model_material(&self, name: &str) -> bool {
+        self.mesh.nodes.iter().any(|n| n.kind == obj::Kind::Material && n.material_name() == Some(name))
+    }
+
+    /// The material the material panel shows: the one picked in the file explorer, else the selected hierarchy row.
+    fn current_material(&self) -> Option<String> {
+        if let Some(m) = &self.sel_mat {
+            if self.material_library().iter().any(|(n, _)| n == m) {
+                return Some(m.clone());
+            }
+        }
+        self.material_node().and_then(|s| self.mesh.nodes[s].material_name().map(String::from))
+    }
+
+    /// What a material looks like right now (its model values with the edits over them).
+    fn material_view(&self, name: &str) -> MatView {
+        if let Some(i) = self.mesh.nodes.iter().position(|n| n.kind == obj::Kind::Material && n.material_name() == Some(name)) {
+            return MatView { color: self.rt.color[i], alpha: self.rt.alpha[i], texture: self.rt.texture[i].clone(), mode: self.rt.mode[i], camera: self.rt.camera[i].clone(), surf: self.rt.surf[i] };
+        }
+        let mut v = MatView { color: None, alpha: 1.0, texture: None, mode: 0, camera: None, surf: scene::Surface::default() };
+        if let Some(m) = self.edits.materials.get(name) {
+            apply_material(m, &mut v.color, &mut v.alpha, &mut v.texture, &mut v.mode, &mut v.camera, &mut v.surf);
+        }
+        v
+    }
+
+    fn refresh_material(&self) {
+        let w = &self.window;
+        let Some(name) = self.current_material() else { return };
+        let model = self.is_model_material(&name);
+        let v = self.material_view(&name);
+        let edit = self.edits.materials.get(&name).filter(|e| !e.is_empty());
+        let mut users: Vec<&str> = self.edits.assign.iter().filter(|(_, m)| **m == name).map(|(o, _)| o.as_str()).collect();
+        for n in &self.mesh.nodes {
+            if n.kind == obj::Kind::Material && n.material_name() == Some(name.as_str()) {
+                if let Some(p) = n.parent {
+                    users.push(self.mesh.nodes[p].name.as_str());
+                }
+            }
+        }
+        users.sort();
+        users.dedup();
+        let tex = v.texture.as_deref().map(|p| Path::new(p).file_name().map_or(p.to_string(), |f| f.to_string_lossy().into_owned()));
+        let status = match (model, edit.is_some()) {
+            (true, false) => "From the model: as it is in Blender",
+            (true, true) => "From the model, edited (Reset puts it back)",
+            (false, _) => "Made in Polystation",
+        };
+        let color = v.color.map_or("from the model".to_string(), |c| format!("#{:02X}{:02X}{:02X}", (c[0] * 255.0 + 0.5) as u8, (c[1] * 255.0 + 0.5) as u8, (c[2] * 255.0 + 0.5) as u8));
+        w.set_text(win32::ST_MATINFO, &format!("{status}\r\nUsed by {} object(s)\r\nTexture: {}   Color: {color}", users.len(), tex.as_deref().unwrap_or(if model { "from the model" } else { "none" })));
+        w.set_text(win32::ED_MATNAME, &name);
+        w.set_enabled(win32::ED_MATNAME, !model);
+        let s = &v.surf;
+        for (id, val) in [
+            (win32::ED_MATALPHA, v.alpha),
+            (win32::ED_MATBRIGHT, s.bright),
+            (win32::ED_MATGLOW, s.glow),
+            (win32::ED_MATCUT, s.cutout),
+            (win32::ED_MATROT, s.rotate),
+            (win32::ED_MATTILE0, s.tile[0]),
+            (win32::ED_MATTILE1, s.tile[1]),
+            (win32::ED_MATOFF0, s.offset[0]),
+            (win32::ED_MATOFF1, s.offset[1]),
+            (win32::ED_MATSCR0, s.scroll[0]),
+            (win32::ED_MATSCR1, s.scroll[1]),
+        ] {
+            w.set_text(id, &fmt_f(val));
+        }
+        w.set_checked(win32::CMD_MAT_BACK, s.back_cull);
+        w.set_checked(win32::CMD_MAT_NOFOG, s.no_fog);
+        w.combo_set(win32::CB_MATMODE, &scene::TexMode::NAMES, v.mode as usize);
+        let cams = self.camera_names();
+        let mut items: Vec<&str> = vec!["(none)"];
+        items.extend(cams.iter().map(|c| c.as_str()));
+        w.combo_set(win32::CB_MATCAM, &items, v.camera.as_ref().and_then(|c| cams.iter().position(|x| x == c)).map_or(0, |p| p + 1));
+        w.set_text(win32::CMD_MAT_RESET, if model { "Reset to Blender" } else { "Reset to Default" });
+        w.set_enabled(win32::CMD_MAT_RESET, edit.is_some());
+        w.set_enabled(win32::CMD_MAT_DELETE, !model);
+        w.set_enabled(win32::CMD_MAT_ASSIGN, !self.selected_objects().is_empty());
+    }
+
+    fn after_material_change(&mut self) {
+        self.rt = compute_runtime(self.base.nodes.len(), &self.mesh, &self.edits);
+        self.objects_dirty = true;
+        self.details_dirty = true;
+    }
+
+    /// Changes the shown material (one undo step). Materials are shared by name: every object that uses it changes.
+    fn edit_material(&mut self, f: impl FnOnce(&mut scene::MaterialEdit)) {
+        let Some(key) = self.current_material() else { return };
+        self.push_undo();
+        let e = self.edits.materials.entry(key.clone()).or_default();
+        f(e);
+        if e.is_empty() {
+            self.edits.materials.remove(&key);
+        }
+        self.after_material_change();
+    }
+
+    /// Puts the shown material back the way the model (Blender) has it, or to the defaults for one made here.
+    fn reset_material(&mut self) {
+        let Some(key) = self.current_material() else { return };
+        if self.edits.materials.contains_key(&key) {
+            self.push_undo();
+            self.edits.materials.remove(&key);
+            self.after_material_change();
+            self.status_note(&if self.is_model_material(&key) { format!("{key} is back to what Blender has") } else { format!("{key} is back to the defaults") });
+        }
+    }
+
+    /// A material's current look as a full set of settings (for duplicating it).
+    fn material_as_edit(&self, name: &str) -> scene::MaterialEdit {
+        let v = self.material_view(name);
+        let s = v.surf;
+        scene::MaterialEdit {
+            color: v.color,
+            texture: v.texture,
+            alpha: Some(v.alpha),
+            mode: Some(scene::TexMode::from_index(v.mode as usize)),
+            camera: v.camera,
+            tile: Some(s.tile),
+            offset: Some(s.offset),
+            scroll: Some(s.scroll),
+            rotate: Some(s.rotate),
+            glow: Some(s.glow),
+            bright: Some(s.bright),
+            cutout: Some(s.cutout),
+            back_cull: Some(s.back_cull),
+            no_fog: Some(s.no_fog),
+        }
+    }
+
+    fn unique_material_name(&self, base: &str) -> String {
+        let lib = self.material_library();
+        if !lib.iter().any(|(n, _)| n == base) {
+            return base.to_string();
+        }
+        (1..).map(|k| format!("{base}.{k:03}")).find(|n| !lib.iter().any(|(x, _)| x == n)).unwrap_or_default()
+    }
+
+    /// Makes a material of Polystation: new, or a copy of `from`.
+    fn new_material(&mut self, from: Option<&str>) {
+        self.push_undo();
+        let name = self.unique_material_name(&from.map_or("Material".to_string(), |f| format!("{f} copy")));
+        if let Some(f) = from {
+            let e = self.material_as_edit(f);
+            self.edits.materials.insert(name.clone(), e);
+        }
+        self.edits.user_materials.push(name.clone());
+        self.sel_mat = Some(name.clone());
+        self.after_material_change();
+        self.explorer_refresh();
+        self.status_note(&format!("Made the material {name}"));
+    }
+
+    /// Deletes a material made in Polystation (objects that had it go back to no material).
+    fn delete_material(&mut self) {
+        let Some(name) = self.current_material() else { return };
+        if self.is_model_material(&name) || !self.edits.user_materials.contains(&name) {
+            return self.status_note("Materials of a model cannot be deleted: use Reset to put them back");
+        }
+        self.push_undo();
+        self.edits.user_materials.retain(|m| *m != name);
+        self.edits.materials.remove(&name);
+        self.edits.assign.retain(|_, m| *m != name);
+        self.sel_mat = None;
+        self.after_material_change();
+        self.explorer_refresh();
+        self.status_note(&format!("Deleted {name}"));
+    }
+
+    /// Gives the objects a material (None: no material). Cameras have none.
+    fn assign_material(&mut self, objs: &[usize], mat: Option<String>) {
+        let nb = self.base.nodes.len();
+        let names: Vec<String> = objs.iter().filter(|&&i| !matches!(node_ref(nb, i), NodeRef::Extra(j) if self.edits.extras[j].prim == prims::Prim::Camera)).map(|&i| self.mesh.nodes[i].name.clone()).collect();
+        if names.is_empty() {
+            return self.status_note("Select an object first (cameras have no material)");
+        }
+        self.push_undo();
+        for n in &names {
+            match &mat {
+                Some(m) => {
+                    self.edits.assign.insert(n.clone(), m.clone());
+                }
+                None => {
+                    self.edits.assign.remove(n);
+                }
+            }
+        }
+        self.after_material_change();
+        if let Some(m) = mat {
+            self.status_note(&format!("{} now uses {m}", if names.len() == 1 { names[0].clone() } else { format!("{} objects", names.len()) }));
+        }
+    }
+
+    /// A number box of the material panel changed because the user typed in it.
+    fn on_material_edit(&mut self, id: u16) {
+        let Some(name) = self.current_material() else { return };
+        let text = self.window.get_text(id);
+        if self.edit_key != Some((usize::MAX, id)) {
+            if id == win32::ED_MATNAME && (self.is_model_material(&name) || text.trim().is_empty()) {
+                return;
+            }
+            self.push_undo();
+            self.edit_key = Some((usize::MAX, id));
+        }
+        if id == win32::ED_MATNAME {
+            let new = text.trim().to_string();
+            if self.is_model_material(&name) || new.is_empty() || new == name || self.material_library().iter().any(|(n, _)| *n == new) {
+                return;
+            }
+            for m in self.edits.user_materials.iter_mut().filter(|m| **m == name) {
+                *m = new.clone();
+            }
+            if let Some(e) = self.edits.materials.remove(&name) {
+                self.edits.materials.insert(new.clone(), e);
+            }
+            for m in self.edits.assign.values_mut().filter(|m| **m == name) {
+                *m = new.clone();
+            }
+            self.sel_mat = Some(new);
+            self.explorer_refresh();
+            self.rt = compute_runtime(self.base.nodes.len(), &self.mesh, &self.edits);
+            self.objects_dirty = true;
+            return;
+        }
+        let Ok(v) = text.trim().replace(',', ".").parse::<f32>() else { return };
+        if !v.is_finite() {
+            return;
+        }
+        let cur = self.material_view(&name).surf;
+        let e = self.edits.materials.entry(name).or_default();
+        match id {
+            win32::ED_MATALPHA => e.alpha = Some(v.clamp(0.0, 1.0)),
+            win32::ED_MATBRIGHT => e.bright = Some(v.clamp(0.0, 8.0)),
+            win32::ED_MATGLOW => e.glow = Some(v.clamp(0.0, 1.0)),
+            win32::ED_MATCUT => e.cutout = Some(v.clamp(0.0, 1.0)),
+            win32::ED_MATROT => e.rotate = Some(v),
+            win32::ED_MATTILE0 => e.tile = Some([v.clamp(0.001, 256.0), cur.tile[1]]),
+            win32::ED_MATTILE1 => e.tile = Some([cur.tile[0], v.clamp(0.001, 256.0)]),
+            win32::ED_MATOFF0 => e.offset = Some([v, cur.offset[1]]),
+            win32::ED_MATOFF1 => e.offset = Some([cur.offset[0], v]),
+            win32::ED_MATSCR0 => e.scroll = Some([v, cur.scroll[1]]),
+            win32::ED_MATSCR1 => e.scroll = Some([cur.scroll[0], v]),
+            _ => {}
+        }
+        self.rt = compute_runtime(self.base.nodes.len(), &self.mesh, &self.edits);
+        self.objects_dirty = true;
+    }
+
+    fn material_menu(&self) -> Vec<win32::MenuItem> {
+        use win32::MenuItem as M;
+        let Some(s) = self.material_node() else { return Vec::new() };
+        let name = self.mesh.nodes[s].material_name().unwrap_or("").to_string();
+        let edited = self.edits.materials.get(&name).is_some_and(|e| !e.is_empty());
+        let cams = self.camera_names();
+        let mut cam_items = vec![M::new(win32::CMD_MATCAM_BASE, "(none)").checked(self.rt.camera[s].is_none())];
+        for (k, c) in cams.iter().enumerate().take(8) {
+            cam_items.push(M::new(win32::CMD_MATCAM_BASE + 1 + k as u16, c).checked(self.rt.camera[s].as_deref() == Some(c.as_str())));
+        }
+        vec![
+            M::new(0, &format!("Material: {name}")).enabled(false),
+            M::sep(),
+            M::new(win32::CMD_MAT_RESET, "Reset to Blender").enabled(edited),
+            M::sep(),
+            M::new(win32::CMD_MAT_COLOR, "Color..."),
+            M::new(win32::CMD_MAT_CLEAR_COLOR, "Back to the model's color"),
+            M::new(win32::CMD_MAT_TEXTURE, "Texture..."),
+            M::new(win32::CMD_MAT_CLEAR_TEXTURE, "Clear Texture"),
+            M::submenu("Texture Mode", scene::TexMode::NAMES.iter().enumerate().map(|(i, n)| M::new(win32::CMD_MATMODE_BASE + i as u16, n).checked(self.rt.mode[s] as usize == i)).collect()),
+            M::submenu("Camera View", cam_items),
+        ]
     }
 
     /// A details-panel edit box changed because the user typed in it.
     fn on_edit(&mut self, id: u16) {
         let nb = self.base.nodes.len();
+        if id == win32::ED_MATALPHA || (win32::ED_MATNAME..=win32::ED_MATSCR1).contains(&id) {
+            self.on_material_edit(id);
+            return;
+        }
         let Some(s) = self.ex.selected else { return };
         if id == win32::ED_SCRIPT {
             self.on_script_edit();
@@ -4822,11 +5797,30 @@ Download it from the GitHub releases page to install and update."),
             self.on_scatter_source();
             return;
         }
+        if id == win32::CB_MATMODE {
+            let sel = self.window.combo_selected(id);
+            self.edit_material(|m| m.mode = Some(scene::TexMode::from_index(sel)));
+            return;
+        }
+        if id == win32::CB_MATCAM {
+            let (sel, cams) = (self.window.combo_selected(id), self.camera_names());
+            self.edit_material(|m| m.camera = if sel == 0 { None } else { cams.get(sel - 1).cloned() });
+            return;
+        }
+        if id == win32::CB_OBJMAT {
+            let sel = self.window.combo_selected(id);
+            let lib = self.material_library();
+            let mat = if sel == 0 { None } else { lib.get(sel - 1).map(|(n, _)| n.clone()) };
+            let objs = self.selected_objects();
+            self.assign_material(&objs, mat);
+            return;
+        }
         let sel = self.window.combo_selected(id);
         self.push_undo();
         let e = &mut self.edits.env;
         match id {
             win32::CB_FOG => e.fog = sel.min(2) as u8,
+            win32::CB_COLORBITS => e.color_bits = [4u8, 8, 16, 32][sel.min(3)],
             _ => {
                 e.sky.kind = match sel {
                     1 => SkyKind::Gradient,
@@ -4847,7 +5841,7 @@ Download it from the GitHub releases page to install and update."),
         }
         self.sky_loaded = want.clone();
         let Some(path) = want else { return };
-        match atlas::Atlas::load_bmp(&path) {
+        match image::load(&path) {
             Ok(a) => unsafe { upload_sky(&self.g, self.sky_tex, &a) },
             Err(e) => self.window.message(&format!("Could not load the sky texture:\n\n{e}")),
         }
@@ -4858,6 +5852,20 @@ Download it from the GitHub releases page to install and update."),
         // while playing, the editor's mouse interactions are off (the mouse looks around instead)
         let playing = self.play.is_some();
         self.gui_clicks.clear();
+        if input.explorer_click {
+            // a material row of the file explorer shows the material panel; any other row or a hierarchy click leaves it
+            let picked = self.window.explorer_selected().and_then(|r| self.explorer_items.get(r)).and_then(|(n, _)| n.strip_prefix('\u{1}').map(String::from));
+            self.sel_mat = picked;
+            self.details_dirty = true;
+        }
+        if input.tree_click && self.sel_mat.take().is_some() {
+            self.details_dirty = true;
+        }
+        if self.material_library() != self.mat_lib_key {
+            self.explorer_refresh();
+            self.details_dirty = true;
+        }
+        self.gui_mouse = (input.mouse.0 as f32, input.mouse.1 as f32);
         if playing {
             let want = self.want_cursor_free();
             if want != self.cursor_free {
@@ -4866,10 +5874,11 @@ Download it from the GitHub releases page to install and update."),
                     self.window.look_end();
                     self.look_active = false;
                 } else if !want && !self.look_active {
-                    self.window.look_begin();
+                    self.window.look_begin_centered(); // looking again starts from the middle of the screen
                     self.look_active = true;
                 }
             }
+            self.window.apply_clip();
             self.gui_mouse = (input.mouse.0 as f32, input.mouse.1 as f32);
             self.gui_down = input.left_down && self.cursor_free;
             if let (true, Some(p)) = (self.cursor_free, input.left_pressed) {
@@ -4933,15 +5942,27 @@ Download it from the GitHub releases page to install and update."),
                     win32::DropAt::Inside => hier::Place::Inside(target),
                     win32::DropAt::First => hier::Place::First(target),
                 };
-                if self.reparent(node, place) {
-                    self.status_note("Moved in the hierarchy");
+                // dragging a row of a multi-selection moves every selected object
+                let group: Vec<usize> = if self.ex.multi.len() > 1 && self.ex.multi.contains(&node) {
+                    hier::order(&self.mesh.nodes, &self.edits.hier).into_iter().filter(|i| self.ex.multi.contains(i) && *i != target).collect()
+                } else {
+                    vec![node]
+                };
+                if self.reparent_many(&group, place) {
+                    self.status_note(&if group.len() > 1 { format!("Moved {} objects in the hierarchy", group.len()) } else { "Moved in the hierarchy".to_string() });
                 } else {
                     self.status_note("That move is not possible");
                 }
             }
         }
         if let Some(p) = input.tree_rclick {
-            let items = if self.ex.selected.is_some() { self.object_menu() } else { self.empty_menu() };
+            let items = if self.material_node().is_some() {
+                self.material_menu()
+            } else if self.ex.selected.is_some() {
+                self.object_menu()
+            } else {
+                self.empty_menu()
+            };
             self.show_menu(items, p);
         }
         if let Some(p) = input.explorer_rclick {
@@ -4961,12 +5982,20 @@ Download it from the GitHub releases page to install and update."),
         // click to select (a press and release that barely moved); Alt + drag orbits instead
         if let Some(p) = input.left_pressed {
             let alt = win32::key_down(0x12);
-            let on_compass = if let Some(dir) = self.compass_hit(p.0 as f32, p.1 as f32) {
-                self.view_along(dir);
+            let on_compass = if self.compass_inside(p.0 as f32, p.1 as f32) {
+                let pivot = self.ex.selected.map_or(self.base.center, |s| self.world_bounds(s).0);
+                let dist = math::dot(math::sub(self.cam.pos, pivot), math::sub(self.cam.pos, pivot)).sqrt().max(self.base.radius * 0.02);
+                self.compass_drag = Some(CompassDrag { last: p, start: p, dir: self.compass_hit(p.0 as f32, p.1 as f32), moved: false, pivot, dist });
                 true
             } else {
                 false
             };
+            // pressing on a selected object and dragging moves it over the surfaces of the scene
+            if !alt && !on_compass && self.drag.is_none() {
+                if let Some(h) = self.pick(p.0, p.1).filter(|h| self.ex.multi.contains(h) && self.is_selectable_object(*h)) {
+                    self.begin_surface_drag(p, h);
+                }
+            }
             if !alt && !on_compass {
                 if let Some(h) = self.gizmo_hit(p.0, p.1) {
                     self.begin_drag(p, h);
@@ -4985,10 +6014,26 @@ Download it from the GitHub releases page to install and update."),
         if self.drag.is_some() && input.left_down {
             self.update_drag(input.mouse.0, input.mouse.1);
         }
+        if input.left_down {
+            if let Some(cd) = &mut self.compass_drag {
+                let (dx, dy) = (input.mouse.0 - cd.last.0, input.mouse.1 - cd.last.1);
+                if !cd.moved && (input.mouse.0 - cd.start.0).abs().max((input.mouse.1 - cd.start.1).abs()) >= 4 {
+                    cd.moved = true;
+                }
+                if cd.moved {
+                    self.cam.yaw += dx as f32 * 0.01;
+                    self.cam.pitch = (self.cam.pitch - dy as f32 * 0.01).clamp(-1.5, 1.5);
+                    let f = self.cam.forward();
+                    self.cam.pos = [cd.pivot[0] - f[0] * cd.dist, cd.pivot[1] - f[1] * cd.dist, cd.pivot[2] - f[2] * cd.dist];
+                }
+                cd.last = input.mouse;
+            }
+            self.update_surface_drag(input.mouse);
+        }
         // dragging on empty space draws a selection rectangle
         if input.left_down && self.drag.is_none() && self.orbit.is_none() {
             if let Some((p, alt)) = self.press {
-                if !alt && (input.mouse.0 - p.0).abs().max((input.mouse.1 - p.1).abs()) >= 5 {
+                if !alt && self.surf.is_none() && (input.mouse.0 - p.0).abs().max((input.mouse.1 - p.1).abs()) >= 5 {
                     self.box_sel = Some((p, input.mouse));
                 }
             }
@@ -4996,6 +6041,16 @@ Download it from the GitHub releases page to install and update."),
         if let Some(r) = input.left_released {
             if self.drag.is_some() {
                 self.end_drag();
+            }
+            if let Some(cd) = self.compass_drag.take() {
+                if !cd.moved {
+                    if let Some(dir) = cd.dir {
+                        self.view_along(dir); // a plain click on an axis end looks along that axis
+                    }
+                }
+            }
+            if self.surf.take().is_some_and(|sd| sd.moved) {
+                self.press = None; // it was a drag, not a click
             }
             if let Some((p, alt)) = self.press.take() {
                 let moved = (r.0 - p.0).abs().max((r.1 - p.1).abs());
@@ -5127,21 +6182,45 @@ Download it from the GitHub releases page to install and update."),
         }
     }
 
-    fn draw(&mut self) {
-        let (w, h) = self.window.size();
-        if w <= 0 || h <= 0 {
+    /// Draws the view of every Camera object that a material shows into its tile of the camera atlas.
+    fn update_camera_atlas(&mut self) {
+        let mut names: Vec<String> = Vec::new();
+        for (i, c) in self.rt.camera.iter().enumerate() {
+            if let Some(c) = c {
+                if !self.rt.deleted[i] && !names.contains(c) && names.len() < 4 && self.edits.extras.iter().any(|e| e.prim == prims::Prim::Camera && &e.name == c) {
+                    names.push(c.clone());
+                }
+            }
+        }
+        if names != self.camera_tiles {
+            self.camera_tiles = names.clone();
+            self.objects_dirty = true; // the tiles are part of the object data
+        }
+        if names.is_empty() {
             return;
         }
-        if self.objects_dirty {
-            let water: HashSet<usize> = self.mesh.nodes.iter().enumerate().filter(|(_, n)| n.kind == obj::Kind::Object && self.edits.collision_of(&n.name) == scene::Collision::Water).map(|(i, _)| i).collect();
-            let nb = self.base.nodes.len();
-            let emissive: HashSet<usize> = self.edits.extras.iter().enumerate().filter(|(_, e)| e.prim == prims::Prim::Light).map(|(j, _)| nb + 2 + j).collect();
-            let fx = ObjFx { hidden: self.script_hidden.union(&self.play_hidden).copied().collect(), water, emissive };
-            unsafe { upload_objects(&self.g, self.obj_tex, &self.mesh, &self.ex, &self.rt, &self.utex_rects, &fx) };
-            self.objects_dirty = false;
+        let tile = CAM_ATLAS / 2;
+        unsafe {
+            (self.g.glBindFramebuffer)(gl::FRAMEBUFFER, self.cam_fbo);
         }
+        for (k, name) in names.iter().enumerate() {
+            let Some(i) = self.mesh.nodes.iter().position(|n| &n.name == name) else { continue };
+            let x = self.script_xform(i);
+            let f = math::transform_dir(&math::rot_matrix(x.rot), [0.0, 0.0, -1.0]);
+            let cam = Cam { yaw: f[0].atan2(-f[2]), pitch: f[1].clamp(-1.0, 1.0).asin(), pos: x.pos };
+            self.render_world(cam, 70.0, (k as i32 % 2) * tile, (k as i32 / 2) * tile, tile, tile, true);
+        }
+        unsafe {
+            (self.g.glBindFramebuffer)(gl::FRAMEBUFFER, 0);
+        }
+    }
+
+    /// Draws the sky, the model and the particle systems seen from `cam` into the current framebuffer, in the
+    /// pixel rectangle (vx, vy, w, h). `offscreen` is a camera texture: no grid and no editor matrices kept.
+    fn render_world(&mut self, cam: Cam, fov: f32, vx: i32, vy: i32, w: i32, h: i32, offscreen: bool) {
         let scene_r = self.scene_radius();
-        let (g, cam, mesh) = (&self.g, &self.cam, &self.mesh);
+        let (g, mesh) = (&self.g, &self.mesh);
+        let cam = &cam;
         let f = cam.forward();
         let target = [cam.pos[0] + f[0], cam.pos[1] + f[1], cam.pos[2] + f[2]];
         let view = math::look_at(cam.pos, target, [0.0, 1.0, 0.0]);
@@ -5149,10 +6228,11 @@ Download it from the GitHub releases page to install and update."),
         if self.edits.env.render_distance > 0.0 {
             far = self.edits.env.render_distance.max(near * 10.0);
         }
-        let fov = self.play.as_ref().map_or(self.settings.editor_fov, |p| p.params.fov);
         let proj = math::perspective(fov.to_radians(), w as f32 / h as f32, near, far);
         let mvp = math::mul(&proj, &view);
-        self.last_mvp = mvp;
+        if !offscreen {
+            self.last_mvp = mvp;
+        }
         let v = self.view;
         let wire_only = v.mode == 2;
         let overlay = v.mode == 3;
@@ -5175,10 +6255,27 @@ Download it from the GitHub releases page to install and update."),
         let (sky_kind, sky_solid, sky_top, sky_bottom) = (env.sky.kind, env.sky.solid, env.sky.top, env.sky.bottom);
         let (sky_f, sky_r) = (cam.forward(), cam.right());
         let sky_u = math::cross(sky_r, sky_f);
-        let (vx, vy, _, _) = self.window.viewport();
         unsafe {
             (g.glViewport)(vx, vy, w, h);
+            if offscreen {
+                (g.glEnable)(gl::SCISSOR_TEST);
+                (g.glScissor)(vx, vy, w, h);
+            }
             (g.glClear)(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
+            if offscreen {
+                (g.glDisable)(gl::SCISSOR_TEST);
+            }
+            // the camera atlas is read by the model shader: not while it is being drawn into
+            (g.glActiveTexture)(gl::TEXTURE4);
+            (g.glBindTexture)(gl::TEXTURE_2D, if offscreen { 0 } else { self.cam_tex });
+            (g.glActiveTexture)(gl::TEXTURE0);
+            for p in [self.sky_prog, self.prog, self.grid_prog, self.grid_inf_prog, self.particle_prog] {
+                (g.glUseProgram)(p);
+                let l = (g.glGetUniformLocation)(p, b"colorBits\0".as_ptr());
+                if l >= 0 {
+                    (g.glUniform1i)(l, self.edits.env.color_bits as i32);
+                }
+            }
             // sky first, behind everything
             (g.glDisable)(gl::DEPTH_TEST);
             (g.glUseProgram)(self.sky_prog);
@@ -5186,7 +6283,7 @@ Download it from the GitHub releases page to install and update."),
             (g.glUniform3f)(sl.cam_f, sky_f[0], sky_f[1], sky_f[2]);
             (g.glUniform3f)(sl.cam_r, sky_r[0], sky_r[1], sky_r[2]);
             (g.glUniform3f)(sl.cam_u, sky_u[0], sky_u[1], sky_u[2]);
-            (g.glUniform1f)(sl.tan_half, (60f32.to_radians() * 0.5).tan());
+            (g.glUniform1f)(sl.tan_half, (fov.to_radians() * 0.5).tan());
             (g.glUniform1f)(sl.aspect, w as f32 / h as f32);
             (g.glUniform1i)(sl.mode, match sky_kind { SkyKind::Solid => 0, SkyKind::Gradient => 1, SkyKind::Texture => 2 });
             (g.glUniform3f)(sl.solid, sky_solid[0], sky_solid[1], sky_solid[2]);
@@ -5195,7 +6292,7 @@ Download it from the GitHub releases page to install and update."),
             (g.glBindVertexArray)(self.sky_vao);
             (g.glDrawArrays)(gl::TRIANGLES, 0, 3);
             (g.glEnable)(gl::DEPTH_TEST);
-            if v.grid && self.play.is_none() {
+            if v.grid && self.play.is_none() && !offscreen {
                 (g.glUseProgram)(self.grid_prog);
                 (g.glUniformMatrix4fv)(self.grid_locs.mvp, 1, 0, mvp.as_ptr());
                 (g.glUniform3f)(self.grid_locs.cam, cam.pos[0], cam.pos[1], cam.pos[2]);
@@ -5229,12 +6326,9 @@ Download it from the GitHub releases page to install and update."),
             (g.glUniform1i)(self.locs.dither, dither_px);
             (g.glUniform3f)(self.locs.fog_color, fog_color[0], fog_color[1], fog_color[2]);
             (g.glUniform1f)(self.locs.fog_steps, fog_steps);
-            if v.cull {
-                (g.glEnable)(gl::CULL_FACE);
-                (g.glCullFace)(gl::BACK);
-            } else {
-                (g.glDisable)(gl::CULL_FACE);
-            }
+            // back faces are dropped by the shader (the view's setting, or a material that hides them)
+            (g.glDisable)(gl::CULL_FACE);
+            (g.glUniform1i)(self.locs.cull_on, v.cull as i32);
             if !wire_only {
                 (g.glUniform1i)(self.locs.mode, fill_mode);
                 if overlay {
@@ -5268,7 +6362,7 @@ Download it from the GitHub releases page to install and update."),
                 }
                 (g.glDisable)(gl::POLYGON_OFFSET_FILL);
             }
-            if v.grid && self.play.is_none() {
+            if v.grid && self.play.is_none() && !offscreen {
                 let gi = &self.grid_inf;
                 (g.glUseProgram)(self.grid_inf_prog);
                 (g.glUniformMatrix4fv)(gi.mvp, 1, 0, mvp.as_ptr());
@@ -5276,7 +6370,7 @@ Download it from the GitHub releases page to install and update."),
                 (g.glUniform3f)(gi.cam_f, sky_f[0], sky_f[1], sky_f[2]);
                 (g.glUniform3f)(gi.cam_r, sky_r[0], sky_r[1], sky_r[2]);
                 (g.glUniform3f)(gi.cam_u, sky_u[0], sky_u[1], sky_u[2]);
-                (g.glUniform1f)(gi.tan_half, (60f32.to_radians() * 0.5).tan());
+                (g.glUniform1f)(gi.tan_half, (fov.to_radians() * 0.5).tan());
                 (g.glUniform1f)(gi.aspect, w as f32 / h as f32);
                 (g.glUniform1f)(gi.step, nice_step(scene_r / 16.0));
                 (g.glUniform1f)(gi.fade, cam.pos[1].abs().max(scene_r) * 50.0);
@@ -5339,6 +6433,32 @@ Download it from the GitHub releases page to install and update."),
                 (g.glUseProgram)(self.prog);
                 (g.glBindVertexArray)(self.vao);
             }
+        }
+    }
+
+    fn draw(&mut self) {
+        let (w, h) = self.window.size();
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        if self.objects_dirty {
+            let water: HashSet<usize> = self.mesh.nodes.iter().enumerate().filter(|(_, n)| n.kind == obj::Kind::Object && self.edits.collision_of(&n.name) == scene::Collision::Water).map(|(i, _)| i).collect();
+            let nb = self.base.nodes.len();
+            let emissive: HashSet<usize> = self.edits.extras.iter().enumerate().filter(|(_, e)| e.prim == prims::Prim::Light).map(|(j, _)| nb + 2 + j).collect();
+            let fx = ObjFx { hidden: self.script_hidden.union(&self.play_hidden).copied().collect(), water, emissive };
+            unsafe { upload_objects(&self.g, self.obj_tex, &self.mesh, &self.ex, &self.rt, &self.utex_rects, &fx, &self.uv_boxes, &self.camera_tiles) };
+            self.objects_dirty = false;
+        }
+        let (vx, vy, _, _) = self.window.viewport();
+        self.update_camera_atlas();
+        let fov = self.play.as_ref().map_or(self.settings.editor_fov, |p| p.params.fov);
+        let cam = self.cam;
+        self.render_world(cam, fov, vx, vy, w, h, false);
+        let (g, mesh) = (&self.g, &self.mesh);
+        let mvp = self.last_mvp;
+        let v = self.view;
+        let (wire_only, overlay) = (v.mode == 2, v.mode == 3);
+        unsafe {
             if wire_only || overlay {
                 (g.glUniform1i)(self.locs.mode, 4);
                 (g.glBindBuffer)(gl::ELEMENT_ARRAY_BUFFER, self.wire_ebo);

@@ -5,6 +5,7 @@
 #
 # OBJ extensions understood by gpurender (ignored by other OBJ readers):
 #   usemtl opaque|blend      which draw pass the following faces belong to
+#   gpr_material NAME        the Blender material of the following faces (they become a child node of the object)
 #   mtlrect x y w h          atlas rectangle (pixels, y from the bottom) used by the following faces;
 #                            the shader wraps UVs inside it, so tiling textures still tile
 import struct
@@ -196,15 +197,19 @@ def classify(tile):
 
 # ---------------------------------------------------------------- gather geometry
 meshes = []  # (evaluated mesh copy data) kept as plain python so we can pack after seeing every material
-spec_ids, specs = {}, []
+spec_ids, specs, spec_names = {}, [], []
 
 
 def spec_id(mat):
+    # one entry per Blender material (even when two look the same), so each can be edited on its own
     s = spec_for(mat)
-    if s not in spec_ids:
-        spec_ids[s] = len(specs)
+    name = clean(mat.name) if mat else ""
+    key = (s, name)
+    if key not in spec_ids:
+        spec_ids[key] = len(specs)
         specs.append(s)
-    return spec_ids[s]
+        spec_names.append(name)
+    return spec_ids[key]
 
 
 verts, uvs, faces = [], [], []  # faces: (spec_id, node_index, [(v, vt or None), ...])
@@ -311,6 +316,7 @@ for group in ("opaque", "blend"):
         x0, y0 = pos[sid]
         t = tiles[sid]
         lines.append(f"mtlrect {x0} {y0} {t.shape[1]} {t.shape[0]}")
+        lines.append(f"gpr_material {spec_names[sid]}")
         last = -1
         for node, loops in by_spec[sid]:
             if node != last:

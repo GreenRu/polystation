@@ -5,6 +5,8 @@ dependencies**: its own OpenGL 3.3 renderer (affine texture mapping, vertex ligh
 immediate-mode user interface, a scripting language (GScript) with a visual block editor, a game GUI system,
 and a one-click "Compile" that turns a project into a stand-alone `.exe`.
 
+Website: <https://greenru.github.io/polystation/>
+
 ## Install
 
 Download **`polystation-setup.exe`** from the [latest release](https://github.com/GreenRu/polystation/releases/latest)

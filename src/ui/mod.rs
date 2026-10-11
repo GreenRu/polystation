@@ -210,6 +210,9 @@ pub struct Ui {
     pub combo_events: Vec<u16>,
     pub tree_dbl_click: bool,
     pub explorer_dbl_click: bool,
+    /// A hierarchy row / file explorer row was clicked (one-shot; also true when it was already selected).
+    pub tree_click: bool,
+    pub explorer_click: bool,
     pub tree_rclick: Option<(f32, f32)>,
     /// A hierarchy row was dropped: (dragged node, target node, where relative to the target). Nodes are tree indices.
     pub tree_drop: Option<(usize, usize, tree::DropAt)>,
@@ -238,7 +241,7 @@ pub enum ScriptEvent {
 impl Ui {
     pub fn new(scale: f32) -> Ui {
         let mut groups = [false; 16];
-        for g in [0, 1, 7, 8, 9, 10] {
+        for g in [0, 1, 7, 8, 9, 10, 15] {
             groups[g] = true;
         }
         Ui {
@@ -267,6 +270,8 @@ impl Ui {
             edit_events: Vec::new(),
             combo_events: Vec::new(),
             tree_dbl_click: false,
+            tree_click: false,
+            explorer_click: false,
             explorer_dbl_click: false,
             tree_rclick: None,
             tree_drop: None,
@@ -535,6 +540,12 @@ impl Ui {
         }
     }
 
+    pub fn tree_set_mark(&mut self, item: isize, on: bool) {
+        if let Some(n) = self.tree.node_mut((item - 1).max(0) as usize) {
+            n.mark = on;
+        }
+    }
+
     pub fn tree_set_badge(&mut self, item: isize, on: bool) {
         if let Some(n) = self.tree.node_mut((item - 1).max(0) as usize) {
             n.badge = on;
@@ -705,6 +716,10 @@ impl Ui {
 
     pub fn explorer_add(&mut self, name: &str, kind: &str, size: &str) {
         self.list.add(vec![name.to_string(), kind.to_string(), size.to_string()]);
+    }
+
+    pub fn explorer_select(&mut self, row: usize) {
+        self.list.selected = Some(row);
     }
 
     pub fn explorer_selected(&self) -> Option<usize> {

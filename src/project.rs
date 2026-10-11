@@ -27,6 +27,7 @@
 //! light<TAB><name><TAB><0 point|1 spot|2 sun> <intensity> <range> <spot angle>
 //! collision<TAB><object name><TAB><0 solid | 1 passable | 2 trigger>   (solid is the default and not written)
 //! graph<TAB><object name><TAB><the visual script as one line of JSON>   (see the graph module)
+//! material<TAB><key><TAB><r g b | ->  <alpha | ->  <mode | ->  <TAB><texture | -><TAB><camera | ->   (an edited material; key = material name, or @Object)
 //! guimode <0 look | 1 cursor | 2 tab toggle | 3 hold ctrl>   (how the mouse works while the game plays)
 //! gui<TAB><name><TAB><kind anchor x y w h r g b alpha text_r text_g text_b size value visible><TAB><text, escaped>   (a game GUI element, back to front)
 //! hier<TAB><node name><TAB><parent name, empty = scene>   (the explorer arrangement; one line per node, in display order)
@@ -48,7 +49,7 @@ use std::path::{Path, PathBuf};
 const MAGIC: &str = "POLYSTATION-PROJECT";
 /// Files written before the engine was renamed start with this.
 const LEGACY_MAGIC: &str = "GPURENDER-PROJECT";
-const VERSION: u32 = 19;
+const VERSION: u32 = 23;
 
 /// The extension of project files.
 pub const EXT: &str = "polystation";
@@ -216,6 +217,44 @@ pub fn to_text(dir: &Path, st: &ProjectState) -> String {
     collided.sort_by(|a, b| a.0.cmp(b.0));
     for (name, c) in collided {
         out += &format!("collision\t{}\t{}\n", name, c.index());
+    }
+    let mut mats: Vec<(&String, &crate::scene::MaterialEdit)> = st.edits.materials.iter().filter(|(_, m)| !m.is_empty()).collect();
+    mats.sort_by(|a, b| a.0.cmp(b.0));
+    for (key, m) in mats {
+        let col = m.color.map_or("-".to_string(), |c| format!("{} {} {}", c[0], c[1], c[2]));
+        out += &format!(
+            "material\t{}\t{}|{}|{}\t{}\t{}\n",
+            key.replace(['\t', '\n', '|'], " "),
+            col,
+            m.alpha.map_or("-".to_string(), |a| a.to_string()),
+            m.mode.map_or("-".to_string(), |x| x.index().to_string()),
+            m.texture.as_deref().map_or("-".to_string(), |t| to_stored(t, &dir)),
+            m.camera.as_deref().unwrap_or("-")
+        );
+    }
+    // the rest of a material's settings, the materials made here, and which object has which material
+    {
+        let f1 = |v: Option<f32>| v.map_or("-".to_string(), |x| x.to_string());
+        let f2 = |v: Option<[f32; 2]>| v.map_or("-".to_string(), |x| format!("{},{}", x[0], x[1]));
+        let fb = |v: Option<bool>| v.map_or("-".to_string(), |x| (x as u8).to_string());
+        let clean = |s: &str| s.replace(['\t', '\n', '|'], " ");
+        let mut extra: Vec<(&String, &crate::scene::MaterialEdit)> = st.edits.materials.iter().filter(|(_, m)| m.tile.is_some() || m.offset.is_some() || m.scroll.is_some() || m.rotate.is_some() || m.glow.is_some() || m.bright.is_some() || m.cutout.is_some() || m.back_cull.is_some() || m.no_fog.is_some()).collect();
+        extra.sort_by(|a, b| a.0.cmp(b.0));
+        for (key, m) in extra {
+            out += &format!("matx\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", clean(key), f2(m.tile), f2(m.offset), f2(m.scroll), f1(m.rotate), f1(m.glow), f1(m.bright), f1(m.cutout), fb(m.back_cull), fb(m.no_fog));
+        }
+        for name in &st.edits.user_materials {
+            out += &format!("usermat\t{}\n", clean(name));
+        }
+        let mut assigned: Vec<(&String, &String)> = st.edits.assign.iter().collect();
+        assigned.sort();
+        for (o, m) in assigned {
+            out += &format!("assign\t{}\t{}\n", clean(o), clean(m));
+        }
+    }
+    out += &format!("colorbits {}\n", st.edits.env.color_bits);
+    if let Some(c) = &st.edits.game_camera {
+        out += &format!("gamecamera {c}\n");
     }
     out += &format!("guimode {}\n", st.edits.gui_mode.index());
     for e in &st.edits.gui {
@@ -387,6 +426,58 @@ pub fn from_text(text: &str, dir: &Path) -> Result<ProjectState, String> {
             }
             continue;
         }
+        if let Some(r) = line.strip_prefix("material\t") {
+            let f: Vec<&str> = r.split('\t').collect();
+            if f.len() == 4 {
+                let parts: Vec<&str> = f[1].split('|').collect();
+                if parts.len() == 3 {
+                    let color = floats(&parts[0].split_whitespace().collect::<Vec<_>>()).filter(|v| v.len() == 3).map(|v| [v[0].clamp(0.0, 1.0), v[1].clamp(0.0, 1.0), v[2].clamp(0.0, 1.0)]);
+                    let m = crate::scene::MaterialEdit {
+                        color,
+                        alpha: parts[1].parse::<f32>().ok().map(|a| a.clamp(0.0, 1.0)),
+                        mode: parts[2].parse::<usize>().ok().map(crate::scene::TexMode::from_index),
+                        texture: (f[2] != "-").then(|| from_stored(f[2], &dir)),
+                        camera: (f[3] != "-").then(|| f[3].to_string()),
+                        ..Default::default()
+                    };
+                    if !f[0].starts_with('@') {
+                        // (the "@Object" surfaces of older projects are gone: materials replaced them)
+                        st.edits.materials.insert(f[0].to_string(), m);
+                    }
+                }
+            }
+            continue;
+        }
+        if let Some(r) = line.strip_prefix("matx\t") {
+            let f: Vec<&str> = r.split('\t').collect();
+            if f.len() == 10 && !f[0].starts_with('@') {
+                let p2 = |s: &str| -> Option<[f32; 2]> {
+                    let (a, b) = s.split_once(',')?;
+                    Some([a.parse().ok().filter(|v: &f32| v.is_finite())?, b.parse().ok().filter(|v: &f32| v.is_finite())?])
+                };
+                let p1 = |s: &str| s.parse::<f32>().ok().filter(|v| v.is_finite());
+                let pb = |s: &str| match s {
+                    "1" => Some(true),
+                    "0" => Some(false),
+                    _ => None,
+                };
+                let e = st.edits.materials.entry(f[0].to_string()).or_default();
+                (e.tile, e.offset, e.scroll, e.rotate, e.glow, e.bright, e.cutout, e.back_cull, e.no_fog) = (p2(f[1]), p2(f[2]), p2(f[3]), p1(f[4]), p1(f[5]), p1(f[6]), p1(f[7]), pb(f[8]), pb(f[9]));
+            }
+            continue;
+        }
+        if let Some(r) = line.strip_prefix("usermat\t") {
+            if !r.is_empty() && !st.edits.user_materials.iter().any(|m| m == r) {
+                st.edits.user_materials.push(r.to_string());
+            }
+            continue;
+        }
+        if let Some(r) = line.strip_prefix("assign\t") {
+            if let Some((o, m)) = r.split_once('\t') {
+                st.edits.assign.insert(o.to_string(), m.to_string());
+            }
+            continue;
+        }
         if let Some(r) = line.strip_prefix("gui\t") {
             let mut it = r.splitn(3, '\t');
             if let (Some(name), Some(nums), Some(text)) = (it.next(), it.next(), it.next()) {
@@ -478,6 +569,8 @@ pub fn from_text(text: &str, dir: &Path) -> Result<ProjectState, String> {
         match key {
             "model" => st.model = from_stored(rest, &dir),
             "atlas" => st.atlas = Some(from_stored(rest, &dir)),
+            "gamecamera" => st.edits.game_camera = Some(rest.to_string()),
+            "colorbits" => st.edits.env.color_bits = rest.parse().ok().filter(|b| [4u8, 8, 16, 32].contains(b)).unwrap_or(32),
             "guimode" => st.edits.gui_mode = crate::gui::Mode::from_index(rest.parse().unwrap_or(2)),
             "import" => st.imports.push(from_stored(rest, &dir)),
             "camera" => {
@@ -691,6 +784,10 @@ mod tests {
             alpha: 1.0,
         });
         edits.set_collision("Cube", crate::scene::Collision::Trigger);
+        edits.materials.insert("Wood".into(), crate::scene::MaterialEdit { color: Some([0.5, 0.25, 0.125]), texture: Some(dir.join("wood tex.bmp").to_string_lossy().into_owned()), alpha: Some(0.5), mode: Some(crate::scene::TexMode::Mirror), camera: Some("Cam A".into()), tile: Some([2.0, 3.0]), offset: Some([0.25, 0.5]), scroll: Some([0.1, -0.2]), rotate: Some(45.0), glow: Some(0.5), bright: Some(1.5), cutout: Some(0.5), back_cull: Some(true), no_fog: Some(false) });
+        edits.user_materials = vec!["Neon".into(), "Glass".into()];
+        edits.materials.insert("Neon".into(), crate::scene::MaterialEdit { glow: Some(1.0), mode: Some(crate::scene::TexMode::Stretch), ..Default::default() });
+        edits.assign.insert("Cube".into(), "Neon".into());
         edits.gui_mode = crate::gui::Mode::Hold;
         edits.graphs.insert("Hero".into(), crate::graph::Graph::starter());
         edits.gui = vec![

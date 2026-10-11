@@ -81,8 +81,130 @@ pub struct Edits {
     pub gui: Vec<crate::gui::GuiElem>,
     /// How the mouse works while playing (see the gui module).
     pub gui_mode: crate::gui::Mode,
+    /// The Camera object the game looks through from the start (None: the player's eyes).
+    pub game_camera: Option<String>,
+    /// Edited materials (see [`MaterialEdit`]); also holds the settings of the materials made in Polystation.
+    pub materials: HashMap<String, MaterialEdit>,
+    /// Materials made in Polystation (not from a model), in the order they were made.
+    pub user_materials: Vec<String>,
+    /// The material assigned to an object, by object name.
+    pub assign: HashMap<String, String>,
     /// The visual scripts, by object name (the script text of such an object is generated from its graph).
     pub graphs: HashMap<String, crate::graph::Graph>,
+}
+
+/// How a texture covers the faces that use it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TexMode {
+    /// The texture tiles wherever the UVs leave 0..1.
+    #[default]
+    Repeat,
+    /// One copy of the texture is stretched over all the UVs of the material.
+    Stretch,
+    /// Like repeat, but every other tile is flipped.
+    Mirror,
+    /// UVs outside 0..1 keep the colour of the texture's edge.
+    Clamp,
+}
+
+impl TexMode {
+    pub const NAMES: [&'static str; 4] = ["Repeat", "Stretch", "Mirror", "Clamp"];
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    pub fn from_index(i: usize) -> TexMode {
+        [TexMode::Repeat, TexMode::Stretch, TexMode::Mirror, TexMode::Clamp][i.min(3)]
+    }
+}
+
+/// What the user set on a material. Keyed by the material's name (so it survives a reload of the Blender
+/// file). For a material of a model a field of None is still what the model says; for a material made in
+/// Polystation it is the default.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MaterialEdit {
+    pub color: Option<[f32; 3]>,
+    pub texture: Option<String>,
+    pub alpha: Option<f32>,
+    pub mode: Option<TexMode>,
+    /// A Camera object whose view is shown on the surface (instead of the texture).
+    pub camera: Option<String>,
+    /// How many times the texture repeats over the UVs (u, v).
+    pub tile: Option<[f32; 2]>,
+    /// Shifts the texture (in texture widths).
+    pub offset: Option<[f32; 2]>,
+    /// Slides the texture, in texture widths per second.
+    pub scroll: Option<[f32; 2]>,
+    /// Turns the texture, degrees.
+    pub rotate: Option<f32>,
+    /// 0 = lit by the scene, 1 = shines by itself.
+    pub glow: Option<f32>,
+    /// Multiplies the texture / color.
+    pub bright: Option<f32>,
+    /// Pixels of the texture below this alpha are cut out (0 = off).
+    pub cutout: Option<f32>,
+    /// Hide the back faces of this material (even when the view's backface culling is off).
+    pub back_cull: Option<bool>,
+    /// Not hidden by fog.
+    pub no_fog: Option<bool>,
+}
+
+impl MaterialEdit {
+    pub fn is_empty(&self) -> bool {
+        *self == MaterialEdit::default()
+    }
+
+    /// Puts the surface settings of this material over `s`.
+    pub fn apply(&self, s: &mut Surface) {
+        if let Some(v) = self.tile {
+            s.tile = v;
+        }
+        if let Some(v) = self.offset {
+            s.offset = v;
+        }
+        if let Some(v) = self.scroll {
+            s.scroll = v;
+        }
+        if let Some(v) = self.rotate {
+            s.rotate = v;
+        }
+        if let Some(v) = self.glow {
+            s.glow = v;
+        }
+        if let Some(v) = self.bright {
+            s.bright = v;
+        }
+        if let Some(v) = self.cutout {
+            s.cutout = v;
+        }
+        if let Some(v) = self.back_cull {
+            s.back_cull = v;
+        }
+        if let Some(v) = self.no_fog {
+            s.no_fog = v;
+        }
+    }
+}
+
+/// The settings of a material that decide how a surface is shaded, with their defaults filled in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Surface {
+    pub tile: [f32; 2],
+    pub offset: [f32; 2],
+    pub scroll: [f32; 2],
+    pub rotate: f32,
+    pub glow: f32,
+    pub bright: f32,
+    pub cutout: f32,
+    pub back_cull: bool,
+    pub no_fog: bool,
+}
+
+impl Default for Surface {
+    fn default() -> Surface {
+        Surface { tile: [1.0, 1.0], offset: [0.0; 2], scroll: [0.0; 2], rotate: 0.0, glow: 0.0, bright: 1.0, cutout: 0.0, back_cull: false, no_fog: false }
+    }
 }
 
 /// What happens when the player meets an object.
@@ -167,6 +289,8 @@ pub struct Environment {
     pub ambient: [f32; 3],
     /// Multiplier for the ambient light (above 1 brightens past the colour).
     pub ambient_strength: f32,
+    /// Colour depth of the picture: 4, 8, 16 or 32 bits (see the shaders).
+    pub color_bits: u8,
 }
 
 pub const BACKGROUND: [f32; 3] = [0.08, 0.09, 0.125];
@@ -183,6 +307,7 @@ impl Default for Environment {
             render_distance: 0.0,
             ambient: [0.35, 0.35, 0.35],
             ambient_strength: 1.0,
+            color_bits: 32,
             sky: Sky { kind: SkyKind::Solid, solid: BACKGROUND, top: [0.12, 0.2, 0.42], bottom: [0.55, 0.62, 0.75], texture: None },
         }
     }
@@ -222,7 +347,7 @@ pub fn custom_template(base: &Mesh, extras: &[Extra], name: &str) -> Option<Vec<
             let rect = [base.data[b + 8], base.data[b + 9], base.data[b + 10], base.data[b + 11]];
             out.push((vec![v(0), v(1), v(2)], rect));
         }
-    } else if let Some(e) = extras.iter().find(|e| e.name == name && !matches!(e.prim, Prim::Scatter | Prim::Terrain | Prim::Particles | Prim::Light | Prim::Player)) {
+    } else if let Some(e) = extras.iter().find(|e| e.name == name && !matches!(e.prim, Prim::Scatter | Prim::Terrain | Prim::Particles | Prim::Light | Prim::Player | Prim::Camera)) {
         let faces = if e.prim == Prim::Tree { crate::trees::faces(&e.tree) } else { e.prim.faces() };
         out = faces.into_iter().map(|f| (f, [0.0; 4])).collect();
     }
@@ -294,7 +419,7 @@ pub fn compose(base: &Mesh, extras: &[Extra], views: &[(i32, i32)]) -> Mesh {
                 e.prim.faces()
             };
             let mut n = Node::new(Kind::Object, Some(root), &e.name, false);
-            n.radius = prims::radius(&faces).max(1e-3);
+            n.radius = if e.prim == Prim::Camera { 0.6 } else { prims::radius(&faces).max(1e-3) };
             for (fi, f) in faces.iter().enumerate() {
                 match f.len() {
                     4 => n.quads += 1,

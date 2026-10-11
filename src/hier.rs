@@ -63,7 +63,7 @@ pub fn apply(nodes: &mut [Node], base: &[Node], hier: &[(String, String)]) {
         let Some(&c) = index.get(child.as_str()) else { continue };
         let p = if parent.is_empty() { Some(0) } else { index.get(parent.as_str()).copied() };
         let Some(p) = p else { continue };
-        if c == 0 || c == fixed || nodes[c].kind == Kind::Environment || nodes[p].kind == Kind::Environment || is_ancestor_or_self(nodes, c, p) {
+        if c == 0 || c == fixed || nodes[c].kind == Kind::Environment || nodes[p].kind == Kind::Environment || nodes[c].kind == Kind::Material || nodes[p].kind == Kind::Material || is_ancestor_or_self(nodes, c, p) {
             continue;
         }
         nodes[c].parent = Some(p);
@@ -106,8 +106,8 @@ pub fn descendants(nodes: &[Node], i: usize) -> Vec<usize> {
 /// or its own children, moving the scene / environment, nothing changes ...). `nodes` carry the current
 /// effective parents.
 pub fn moved(nodes: &[Node], hier: &[(String, String)], node: usize, place: Place) -> Option<Vec<(String, String)>> {
-    if node == 0 || nodes[node].kind == Kind::Environment {
-        return None;
+    if node == 0 || nodes[node].kind == Kind::Environment || nodes[node].kind == Kind::Material {
+        return None; // a material belongs to its object and cannot be moved
     }
     let mut kids = children(nodes, hier);
     let old_parent = nodes[node].parent?;
@@ -121,7 +121,7 @@ pub fn moved(nodes: &[Node], hier: &[(String, String)], node: usize, place: Plac
         Place::Inside(t) => (t, kids[t].len()),
         Place::First(t) => (t, 0),
     };
-    if nodes[np].kind == Kind::Environment || is_ancestor_or_self(nodes, node, np) {
+    if nodes[np].kind == Kind::Environment || nodes[np].kind == Kind::Material || is_ancestor_or_self(nodes, node, np) {
         return None;
     }
     kids[np].insert(idx, node);

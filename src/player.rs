@@ -106,14 +106,30 @@ impl PlayerParams {
     }
 }
 
-/// The editor stand-in: a body of the player's size standing on y = 0, plus a visor at eye height.
+/// The editor stand-in: a pill of the player's size standing on y = 0.
 pub fn faces(p: &PlayerParams) -> Vec<Face> {
     let p = &p.scaled();
     let (h, r, eye) = (p.height.max(0.05), p.radius.max(0.01), p.eye_height.clamp(0.0, p.height.max(0.05)));
-    let mut f = shifted(scaled(prims::cylinder(16), [r * 2.0, h, r * 2.0]), [0.0, h * 0.5, 0.0]);
-    let v = (r * 0.7).min(h * 0.2);
-    f.extend(shifted(scaled(Prim::Cube.faces(), [r * 1.2, v, r * 0.9]), [0.0, (eye - v * 0.2).max(v * 0.5), -r]));
-    f
+    let _ = eye;
+    pill(r, h)
+}
+
+/// A pill (capsule): a tube with a half sphere on each end, `h` tall and `2 r` wide, standing on y = 0.
+pub fn pill(r: f32, h: f32) -> Vec<Face> {
+    let r = r.min(h * 0.5);
+    let tube_h = (h - 2.0 * r).max(0.0);
+    let (mut top, mut bottom) = (Vec::new(), Vec::new());
+    for f in prims::sphere(8, 16) {
+        if f.iter().map(|(p, _)| p[1]).sum::<f32>() >= 0.0 { top.push(f) } else { bottom.push(f) }
+    }
+    let up = h * 0.5 - r;
+    let mut out = shifted(scaled(top, [r * 2.0; 3]), [0.0, up, 0.0]);
+    out.extend(shifted(scaled(bottom, [r * 2.0; 3]), [0.0, -up, 0.0]));
+    if tube_h > 1e-4 {
+        let tube: Vec<Face> = prims::cylinder(16).into_iter().filter(|f| f.len() == 4).collect();
+        out.extend(scaled(tube, [r * 2.0, tube_h, r * 2.0]));
+    }
+    shifted(out, [0.0, h * 0.5, 0.0])
 }
 
 /// Reads a .wav file and scales its samples by `volume` (0 - 1), ready for in-memory playback.

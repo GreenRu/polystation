@@ -275,6 +275,7 @@ impl App {
             .with("color", self.rt.color[i].map_or(J::Null, J::from))
             .with("alpha", self.rt.alpha[i])
             .with("collision", scene::Collision::NAMES[self.edits.collision_of(&n.name) as usize])
+            .with("material", self.edits.assign.get(&n.name).map_or(J::Null, |m| J::from(m.as_str())))
             .with("light", match crate::node_ref(nb, i) {
                 NodeRef::Extra(j) if self.edits.extras[j].prim == prims::Prim::Light => {
                     let l = &self.edits.extras[j].light;
@@ -298,6 +299,7 @@ impl App {
                 obj::Kind::Object => "object",
                 obj::Kind::Collection => "collection",
                 obj::Kind::Environment => "environment",
+                obj::Kind::Material => "material",
             };
             let sub: Vec<J> = kids[i].iter().filter(|&&k| !app.rt.deleted[k]).map(|&k| rec(app, kids, k)).collect();
             J::obj().with("name", n.name.as_str()).with("kind", kind).with("children", sub)
@@ -313,8 +315,107 @@ impl App {
         }
     }
 
+    /// Material settings from tool arguments, put on the material called `name`.
+    fn mcp_material_props(&mut self, name: &str, args: &J) -> Result<(), String> {
+        let mut m = self.edits.materials.get(name).cloned().unwrap_or_default();
+        if args.get("color").is_some() {
+            m.color = Some(parse_color(args, "color").ok_or("color must be [r,g,b] (0..1) or \"#rrggbb\"")?);
+        }
+        if let Some(a) = args.num("alpha") {
+            m.alpha = Some((a as f32).clamp(0.0, 1.0));
+        }
+        if let Some(t) = args.str("texture") {
+            m.texture = if t.is_empty() { None } else if crate::image::supported(t) && std::path::Path::new(t).is_file() { Some(t.to_string()) } else { return Err(format!("{t} is not a PNG / JPEG / TGA / BMP file that exists")) };
+        }
+        if let Some(md) = args.str("texture_mode") {
+            m.mode = Some(scene::TexMode::from_index(scene::TexMode::NAMES.iter().position(|n| n.eq_ignore_ascii_case(md)).ok_or("texture_mode must be repeat, stretch, mirror or clamp")?));
+        }
+        if let Some(c) = args.str("camera") {
+            if !c.is_empty() && !self.edits.extras.iter().any(|e| e.prim == prims::Prim::Camera && e.name == c) {
+                return Err(format!("no Camera object named \"{c}\""));
+            }
+            m.camera = (!c.is_empty()).then(|| c.to_string());
+        }
+        for (key, slot) in [("tile", &mut m.tile), ("offset", &mut m.offset), ("scroll", &mut m.scroll)] {
+            if args.get(key).is_some() {
+                *slot = Some(args.vec2(key).ok_or_else(|| format!("{key} must be [u, v]"))?);
+            }
+        }
+        if let Some(t) = m.tile.as_mut() {
+            *t = [t[0].clamp(0.001, 256.0), t[1].clamp(0.001, 256.0)];
+        }
+        if let Some(v) = args.num("rotate") {
+            m.rotate = Some(v as f32);
+        }
+        if let Some(v) = args.num("glow") {
+            m.glow = Some((v as f32).clamp(0.0, 1.0));
+        }
+        if let Some(v) = args.num("brightness") {
+            m.bright = Some((v as f32).clamp(0.0, 8.0));
+        }
+        if let Some(v) = args.num("cutout") {
+            m.cutout = Some((v as f32).clamp(0.0, 1.0));
+        }
+        if let Some(v) = args.boolean("hide_back_faces") {
+            m.back_cull = Some(v);
+        }
+        if let Some(v) = args.boolean("ignore_fog") {
+            m.no_fog = Some(v);
+        }
+        if m.is_empty() {
+            self.edits.materials.remove(name);
+        } else {
+            self.edits.materials.insert(name.to_string(), m);
+        }
+        Ok(())
+    }
+
+    fn material_json(&self, name: &str, model: bool) -> J {
+        let v = self.material_view(name);
+        let s = v.surf;
+        let pair = |p: [f32; 2]| vec![J::from(p[0]), J::from(p[1])];
+        let mut users: Vec<String> = self.edits.assign.iter().filter(|(_, m)| m.as_str() == name).map(|(o, _)| o.clone()).collect();
+        for n in &self.mesh.nodes {
+            if n.kind == obj::Kind::Material && n.material_name() == Some(name) {
+                if let Some(p) = n.parent {
+                    users.push(self.mesh.nodes[p].name.clone());
+                }
+            }
+        }
+        users.sort();
+        users.dedup();
+        J::obj()
+            .with("name", name)
+            .with("source", if model { "model" } else { "project" })
+            .with("edited", self.edits.materials.get(name).is_some_and(|e| !e.is_empty()))
+            .with("color", v.color.map_or(J::Null, J::from))
+            .with("alpha", v.alpha)
+            .with("texture", v.texture.as_deref().map_or(J::Null, J::from))
+            .with("texture_mode", scene::TexMode::NAMES[v.mode as usize % 4])
+            .with("camera", v.camera.as_deref().map_or(J::Null, J::from))
+            .with("tile", pair(s.tile))
+            .with("offset", pair(s.offset))
+            .with("scroll", pair(s.scroll))
+            .with("rotate", s.rotate)
+            .with("glow", s.glow)
+            .with("brightness", s.bright)
+            .with("cutout", s.cutout)
+            .with("hide_back_faces", s.back_cull)
+            .with("ignore_fog", s.no_fog)
+            .with("used_by", users.into_iter().map(J::from).collect::<Vec<_>>())
+    }
+
     fn mcp_apply_props(&mut self, name: &str, args: &J) -> Result<(), String> {
         let i = self.find_object(name).ok_or_else(|| format!("no object named \"{name}\" (use get_scene to list the objects)"))?;
+        if matches!(crate::node_ref(self.base.nodes.len(), i), NodeRef::Extra(j) if self.edits.extras[j].prim == prims::Prim::Camera) && (args.get("color").is_some() || args.get("alpha").is_some() || args.get("collision").is_some() || args.get("material").is_some()) {
+            return Err("a Camera has no color, opacity, material or collision".into());
+        }
+        if let Some(mat) = args.str("material") {
+            if !mat.is_empty() && !self.material_library().iter().any(|(n, _)| n == mat) {
+                return Err(format!("no material named \"{mat}\" (get_materials lists them, create_material makes one)"));
+            }
+            self.assign_material(&[i], (!mat.is_empty()).then(|| mat.to_string()));
+        }
         let mut x = self.rt.xf[i];
         if let Some(p) = args.vec3("position") {
             x.pos = p;
@@ -485,6 +586,89 @@ impl App {
                 let summary = self.compile_game(std::path::Path::new(path))?;
                 Ok(J::obj().with("path", path).with("summary", summary))
             }
+            "get_materials" => {
+                let list: Vec<J> = self.material_library().iter().map(|(n, model)| self.material_json(n, *model)).collect();
+                let mut assigned: Vec<(&String, &String)> = self.edits.assign.iter().collect();
+                assigned.sort();
+                let mut a = J::obj();
+                for (o, m) in assigned {
+                    a = a.with(o.as_str(), m.as_str());
+                }
+                Ok(J::obj().with("materials", list).with("assignments", a).with("texture_modes", scene::TexMode::NAMES.iter().map(|&m| J::from(m)).collect::<Vec<_>>()))
+            }
+            "set_material" => {
+                self.require_editing()?;
+                let name = args.str("name").ok_or("name is required: a material from get_materials")?.to_string();
+                if !self.material_library().iter().any(|(n, _)| *n == name) {
+                    return Err(format!("no material named \"{name}\" (get_materials lists them, create_material makes one)"));
+                }
+                self.push_undo();
+                if args.boolean("reset") == Some(true) {
+                    self.edits.materials.remove(&name);
+                } else {
+                    self.mcp_material_props(&name, args)?;
+                }
+                self.after_material_change();
+                Ok(self.material_json(&name, self.is_model_material(&name)))
+            }
+            "create_material" => {
+                self.require_editing()?;
+                let name = args.str("name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Material").to_string();
+                if self.material_library().iter().any(|(n, _)| *n == name) {
+                    return Err(format!("a material called \"{name}\" exists already"));
+                }
+                self.push_undo();
+                if let Some(from) = args.str("copy_from").filter(|f| !f.is_empty()) {
+                    if !self.material_library().iter().any(|(n, _)| n == from) {
+                        return Err(format!("no material named \"{from}\" to copy"));
+                    }
+                    let e = self.material_as_edit(from);
+                    self.edits.materials.insert(name.clone(), e);
+                }
+                self.edits.user_materials.push(name.clone());
+                self.mcp_material_props(&name, args)?;
+                self.after_material_change();
+                self.explorer_refresh();
+                Ok(self.material_json(&name, false))
+            }
+            "delete_material" => {
+                self.require_editing()?;
+                let name = args.str("name").ok_or("name is required")?.to_string();
+                if !self.edits.user_materials.contains(&name) {
+                    return Err("only materials made with create_material can be deleted (a model's materials can be reset instead)".into());
+                }
+                self.push_undo();
+                self.edits.user_materials.retain(|m| *m != name);
+                self.edits.materials.remove(&name);
+                self.edits.assign.retain(|_, m| *m != name);
+                self.sel_mat = None;
+                self.after_material_change();
+                self.explorer_refresh();
+                Ok(J::obj().with("deleted", name))
+            }
+            "assign_material" => {
+                self.require_editing()?;
+                let object = args.str("object").ok_or("object is required")?;
+                let mat = args.str("material").ok_or("material is required (empty string = no material)")?;
+                let i = self.find_object(object).ok_or_else(|| format!("no object named \"{object}\""))?;
+                if !mat.is_empty() && !self.material_library().iter().any(|(n, _)| n == mat) {
+                    return Err(format!("no material named \"{mat}\""));
+                }
+                self.assign_material(&[i], (!mat.is_empty()).then(|| mat.to_string()));
+                Ok(self.describe(i))
+            }
+            "set_game_camera" => {
+                self.require_editing()?;
+                let name = args.str("name").unwrap_or("");
+                if !name.is_empty() && !self.edits.extras.iter().any(|e| e.prim == prims::Prim::Camera && e.name == name) {
+                    return Err(format!("no Camera object named \"{name}\""));
+                }
+                self.push_undo();
+                self.edits.game_camera = (!name.is_empty()).then(|| name.to_string());
+                self.sync_script_badges();
+                self.details_dirty = true;
+                Ok(J::obj().with("game_camera", self.edits.game_camera.as_deref().map_or(J::Null, J::from)))
+            }
             "get_gui" => Ok(J::obj().with("mode", crate::gui::Mode::NAMES[self.edits.gui_mode.index()]).with("elements", self.edits.gui.iter().map(gui_json).collect::<Vec<_>>())),
             "set_gui_mode" => {
                 self.require_editing()?;
@@ -545,6 +729,8 @@ impl App {
             "select_object" => {
                 let name = args.str("name").ok_or("name is required")?.to_string();
                 self.find_object(&name).ok_or_else(|| format!("no object named \"{name}\""))?;
+                self.sel_mat = None;
+                self.details_dirty = true;
                 self.select_names(&[name.clone()]);
                 Ok(J::obj().with("selected", name))
             }
@@ -595,6 +781,9 @@ impl App {
                 }
                 if args.get("ambient").is_some() {
                     e.ambient = parse_color(args, "ambient").ok_or("bad ambient")?;
+                }
+                if let Some(b) = args.num("color_bits") {
+                    e.color_bits = [4u8, 8, 16, 32].into_iter().min_by_key(|x| (*x as f64 - b).abs() as i64).unwrap_or(32);
                 }
                 if let Some(k) = args.num("ambient_strength") {
                     e.ambient_strength = (k as f32).clamp(0.0, 8.0);
@@ -721,6 +910,29 @@ fn gui_props(first: &'static str) -> Vec<(&'static str, &'static str, &'static s
     v
 }
 
+/// The settings of a material, as tool properties.
+fn material_props(name_key: &'static str, name_desc: &'static str) -> Vec<(&'static str, &'static str, &'static str)> {
+    vec![
+        (name_key, "string", name_desc),
+        ("copy_from", "string", "create_material only: material to start from"),
+        ("color", "color", "[r,g,b] or \"#rrggbb\""),
+        ("alpha", "number", "0..1"),
+        ("texture", "string", "path of a PNG / JPEG / TGA / BMP (empty string clears it)"),
+        ("texture_mode", "string", "repeat | stretch | mirror | clamp"),
+        ("camera", "string", "name of a Camera object whose view is shown instead of the texture (empty clears it)"),
+        ("tile", "array", "[u, v]: how many times the texture repeats"),
+        ("offset", "array", "[u, v]: shifts the texture"),
+        ("scroll", "array", "[u, v]: slides the texture, texture widths per second"),
+        ("rotate", "number", "turns the texture, degrees"),
+        ("glow", "number", "0 = lit by the scene, 1 = shines by itself"),
+        ("brightness", "number", "multiplies the colors, 0..8"),
+        ("cutout", "number", "pixels of the texture with less alpha than this are cut out (0 = off)"),
+        ("hide_back_faces", "boolean", "do not draw the back of faces"),
+        ("ignore_fog", "boolean", "fog does not touch this material"),
+        ("reset", "boolean", "set_material only: back to what Blender has / the defaults"),
+    ]
+}
+
 pub fn tool_list() -> Vec<J> {
     let obj_props: [(&str, &str, &str); 10] = [
         ("position", "vec3", "world position [x,y,z] (Y is up)"),
@@ -736,14 +948,22 @@ pub fn tool_list() -> Vec<J> {
     ];
     let mut add = vec![("kind", "string", "a shape (Cube, Sphere, Terrain, Tree, Light, Player ...) or a gameplay prefab (Coin, Door ...): see get_info"), ("name", "string", "name for the new object")];
     add.extend(obj_props);
+    add.push(("material", "string", "name of a material to give the object; see get_materials"));
     let mut modify = vec![("name", "string", "object to change")];
     modify.extend(obj_props);
+    modify.push(("material", "string", "name of a material to give the object (empty string = none); see get_materials"));
     vec![
         tool("get_info", "Engine and project overview: the open project, camera, play state and every object kind / prefab that add_object accepts.", &[], &[]),
         tool("get_scene", "Lists every object (position, rotation, scale, color, collision, whether it has a script) plus fog / sky / ambient settings.", &[], &[]),
         tool("add_object", "Adds a shape, light, terrain, tree, player, particle system or gameplay prefab to the scene. Without a position it appears in front of the camera.", &add, &["kind"]),
-        tool("modify_object", "Changes an object's transform, color, opacity or collision mode (only the fields you pass).", &modify, &["name"]),
+        tool("modify_object", "Changes an object's transform, color, opacity, collision mode or material (only the fields you pass). A Camera object has no color, opacity, material or collision.", &modify, &["name"]),
         tool("compile", "Builds the stand-alone game (an .exe with the scene, texture atlas, images, sounds and scripts inside; it plays at start-up). The scene needs a Player object.", &[("path", "string", "where to write the .exe"), ("title", "string", "window title"), ("width", "number", "window width"), ("height", "number", "window height"), ("fullscreen", "boolean", "start in full screen"), ("vsync", "boolean", "wait for the monitor refresh"), ("fps_limit", "number", "frame rate cap, 0 = unlimited"), ("show_fps", "boolean", "frame counter in the game")], &["path"]),
+        tool("get_materials", "Lists every material (the ones imported from Blender and the ones made here) with all their settings and which objects use them, plus which material each object was assigned.", &[], &[]),
+        tool("set_material", "Edits a material (every object using it changes). Edits of a Blender material survive a reload of the .blend file; reset=true puts it back to what Blender has (a project material goes back to the defaults).", &material_props("name", "material name (see get_materials)"), &["name"]),
+        tool("create_material", "Makes a new material (shown in the file explorer). Pass any of the settings, or copy_from to start from another material.", &material_props("name", "name of the new material"), &[]),
+        tool("delete_material", "Deletes a material made with create_material; objects that used it have no material again.", &[("name", "string", "material to delete")], &["name"]),
+        tool("assign_material", "Gives an object a material (empty material = none). Cameras cannot have materials.", &[("object", "string", "object name"), ("material", "string", "material name, or an empty string for none")], &["object", "material"]),
+        tool("set_game_camera", "Chooses the Camera object the game looks through from the start (empty name = the player's eyes).", &[("name", "string", "Camera object, or empty")], &[]),
         tool("get_gui", "The game's GUI elements (text, panels, bars, buttons) in drawing order.", &[], &[]),
         tool("set_gui_mode", "How the mouse works while the game plays: look (mouse turns the camera, no clicking), cursor (a pointer that clicks buttons), toggle (look, Tab switches the pointer) or hold (look, hold Ctrl for the pointer).", &[("mode", "string", "look | cursor | toggle | hold")], &["mode"]),
         tool("add_gui", "Adds a GUI element shown on screen while the game plays. Positions are in a 1280x720 design space, measured inward from the anchor edge.", &gui_props("kind"), &["kind"]),
@@ -764,7 +984,7 @@ pub fn tool_list() -> Vec<J> {
         tool(
             "set_environment",
             "Sets fog, sky and ambient light.",
-            &[("fog", "string", "off | smooth | dithered"), ("fog_color", "color", "[r,g,b] or \"#rrggbb\""), ("sky_color", "color", "solid sky color"), ("ambient", "color", "ambient light color"), ("ambient_strength", "number", "ambient multiplier, 0 - 8 (1 = as is)"), ("fog_start", "number", "in scene radii"), ("fog_end", "number", "in scene radii")],
+            &[("fog", "string", "off | smooth | dithered"), ("fog_color", "color", "[r,g,b] or \"#rrggbb\""), ("sky_color", "color", "solid sky color"), ("ambient", "color", "ambient light color"), ("ambient_strength", "number", "ambient multiplier, 0 - 8 (1 = as is)"), ("color_bits", "number", "colour depth: 4, 8, 16 or 32 bits"), ("fog_start", "number", "in scene radii"), ("fog_end", "number", "in scene radii")],
             &[],
         ),
         tool(

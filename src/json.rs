@@ -78,6 +78,15 @@ impl J {
         Some(out)
     }
 
+    /// `[x, y]` of numbers.
+    pub fn vec2(&self, key: &str) -> Option<[f32; 2]> {
+        let a = self.get(key)?.as_arr()?;
+        match a {
+            [J::Num(x), J::Num(y)] => Some([*x as f32, *y as f32]),
+            _ => None,
+        }
+    }
+
     pub fn to_string(&self) -> String {
         let mut s = String::new();
         self.write(&mut s);

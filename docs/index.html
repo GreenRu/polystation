@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Polystation</title>
+<meta name="description" content="Polystation is a free PlayStation-1 style 3D engine and editor for Windows, written from scratch in Rust with no dependencies.">
+<style>
+  :root {
+    --bg: #101018;
+    --panel: #181826;
+    --line: #2c2c44;
+    --text: #e6e6f0;
+    --dim: #9a9ab4;
+    --accent: #4d8dff;
+    --green: #33a05a;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #eceef6; --panel: #ffffff; --line: #c9cde0; --text: #14141f; --dim: #54567a; }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.6 ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace;
+  }
+  a { color: var(--accent); }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 16px; }
+  nav { border-bottom: 2px solid var(--line); background: var(--panel); }
+  nav .wrap { display: flex; align-items: center; gap: 20px; height: 56px; flex-wrap: wrap; }
+  nav b { letter-spacing: 2px; text-transform: uppercase; margin-right: auto; }
+  nav a { color: var(--dim); text-decoration: none; }
+  nav a:hover { color: var(--text); }
+  .hero { padding: 72px 0 48px; border-bottom: 2px solid var(--line); }
+  .hero h1 { font-size: clamp(34px, 7vw, 64px); line-height: 1.05; margin: 0 0 16px; letter-spacing: 2px; text-transform: uppercase; }
+  .hero p { max-width: 640px; color: var(--dim); margin: 0 0 28px; font-size: 18px; }
+  .btn {
+    display: inline-block; padding: 14px 22px; margin: 0 10px 10px 0;
+    background: var(--accent); color: #fff; text-decoration: none; font-weight: bold;
+    border: 2px solid #8db4ff; border-radius: 0; box-shadow: 4px 4px 0 #0b1a3d;
+  }
+  .btn:hover { filter: brightness(1.1); }
+  .btn.alt { background: var(--panel); color: var(--text); border-color: var(--line); box-shadow: 4px 4px 0 #00000055; }
+  .note { color: var(--dim); font-size: 14px; margin-top: 6px; }
+  section { padding: 48px 0; border-bottom: 2px solid var(--line); }
+  h2 { margin: 0 0 20px; font-size: 22px; letter-spacing: 2px; text-transform: uppercase; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+  .card { background: var(--panel); border: 2px solid var(--line); padding: 16px; }
+  .card h3 { margin: 0 0 6px; font-size: 16px; color: var(--accent); }
+  .card p { margin: 0; color: var(--dim); font-size: 15px; }
+  .shot { margin: 0 0 28px; }
+  .shot img { width: 100%; height: auto; display: block; border: 2px solid var(--line); }
+  .shot figcaption { color: var(--dim); font-size: 14px; margin-top: 8px; }
+  pre { background: var(--panel); border: 2px solid var(--line); padding: 14px; overflow-x: auto; margin: 0 0 14px; }
+  code { color: var(--text); }
+  ol, ul { padding-left: 22px; }
+  li { margin-bottom: 6px; }
+  footer { padding: 32px 0 56px; color: var(--dim); font-size: 14px; }
+  .tag { display: inline-block; background: var(--green); color: #fff; padding: 0 8px; font-size: 13px; font-weight: bold; }
+</style>
+</head>
+<body>
+<nav>
+  <div class="wrap">
+    <b>Polystation</b>
+    <a href="#features">Features</a>
+    <a href="#screens">Screenshots</a>
+    <a href="#install">Install</a>
+    <a href="#build">Build</a>
+    <a href="https://github.com/GreenRu/polystation">GitHub</a>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <h1>Polystation</h1>
+    <p>A free, PlayStation&#8209;1 style 3D engine and editor for Windows. Written from scratch in Rust with no dependencies: its own OpenGL renderer, its own interface, its own scripting language. Build a game, press Compile, get one <code>.exe</code>.</p>
+    <a class="btn" href="https://github.com/GreenRu/polystation/releases/latest/download/polystation-setup.exe">Download for Windows</a>
+    <a class="btn alt" href="https://github.com/GreenRu/polystation/releases/latest/download/polystation.exe">polystation.exe only</a>
+    <a class="btn alt" href="https://github.com/GreenRu/polystation">Source code</a>
+    <div class="note">Windows 10 / 11, 64&#8209;bit. Installs for the current user, no admin rights. MIT license.</div>
+  </div>
+</header>
+
+<section id="features">
+  <div class="wrap">
+    <h2>What you get</h2>
+    <div class="grid">
+      <div class="card"><h3>PS1 look, on purpose</h3><p>Affine texture mapping, per&#8209;vertex lighting, dithered fog and a colour&#8209;depth setting (4, 8, 16 or 32 bits).</p></div>
+      <div class="card"><h3>Editor</h3><p>Hierarchy with drag and drop parenting, multi&#8209;select, drag objects onto surfaces, a file explorer, undo, and a start page with templates.</p></div>
+      <div class="card"><h3>Materials</h3><p>Materials are assets. Textures (PNG, JPEG, TGA, BMP), tiling, scrolling, glow, cutout, texture modes, and a camera&#8217;s view as a texture. Blender materials import and keep your edits; reset any time.</p></div>
+      <div class="card"><h3>Cameras</h3><p>Add Camera objects, show their view on a screen, and pick the <span class="tag">scene camera</span> the game starts looking through.</p></div>
+      <div class="card"><h3>Scripting</h3><p>GScript, plus a visual block editor with wires and an eyedropper. Control objects, the player, GUI, sound, cameras and the mouse.</p></div>
+      <div class="card"><h3>Game GUI</h3><p>Text, panels, bars and buttons, with mouse modes: look, cursor, toggle or hold.</p></div>
+      <div class="card"><h3>Player and collision</h3><p>A pill&#8209;shaped player with stairs, slopes, water, triggers, head bob and footsteps.</p></div>
+      <div class="card"><h3>Blender friendly</h3><p>Open or import a .blend, UVs and multiple materials included. Reload when the file changes.</p></div>
+      <div class="card"><h3>Compile to .exe</h3><p>One click builds a stand&#8209;alone game with its textures, sounds and scripts inside.</p></div>
+      <div class="card"><h3>MCP built in</h3><p>An AI assistant can drive the editor over MCP: add objects, edit materials, play, screenshot.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="screens">
+  <div class="wrap">
+    <h2>Screenshots</h2>
+    <figure class="shot">
+      <img src="img/materials.png" alt="The Polystation editor with the material panel open and a tiled checker material on a screen in the scene" width="1600" height="900">
+      <figcaption>Materials live in the file explorer. Select one to edit its texture, tiling, scrolling, glow and more.</figcaption>
+    </figure>
+    <figure class="shot">
+      <img src="img/camera.png" alt="The Polystation editor showing the camera panel with the Set as Scene Camera button" width="1600" height="900">
+      <figcaption>A camera object, tagged CAM in the hierarchy because it is the scene camera.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <h2>Install</h2>
+    <ol>
+      <li>Download <a href="https://github.com/GreenRu/polystation/releases/latest/download/polystation-setup.exe">polystation-setup.exe</a> and run it.</li>
+      <li>It fetches the newest <code>polystation.exe</code> from the releases, installs it for your user, adds a Start menu entry and registers <code>.polystation</code> project files.</li>
+      <li>Run the installer again, or use <b>Help &gt; Check for Updates</b>, to update.</li>
+    </ol>
+    <p>Windows may show a SmartScreen warning because the installer is not code&#8209;signed. Choose <b>More info &gt; Run anyway</b>.</p>
+    <p>To remove it completely, use <b>Help &gt; Uninstall Polystation</b>, or:</p>
+    <pre><code>polystation-setup.exe --uninstall --purge</code></pre>
+    <p>Prefer no installer? Download <a href="https://github.com/GreenRu/polystation/releases/latest/download/polystation.exe">polystation.exe</a> and run it from anywhere.</p>
+  </div>
+</section>
+
+<section id="build">
+  <div class="wrap">
+    <h2>Build from source</h2>
+    <pre><code>git clone https://github.com/GreenRu/polystation
+cd polystation
+cargo build --release</code></pre>
+    <p>Needs a Rust toolchain on Windows. The engine is <code>target/release/polystation.exe</code>, the installer is <code>polystation-setup.exe</code>. There are no crates to download: the project has zero dependencies.</p>
+    <p>Using it with an AI assistant: see <a href="https://github.com/GreenRu/polystation/blob/main/MCP.md">MCP.md</a>.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    Polystation is released under the <a href="https://github.com/GreenRu/polystation/blob/main/LICENSE">MIT license</a>:
+    free to use, modify and share, as long as the original copyright and license notice stay with the code.
+    &middot; <a href="https://github.com/GreenRu/polystation/issues">Report a problem</a>
+  </div>
+</footer>
+</body>
+</html>

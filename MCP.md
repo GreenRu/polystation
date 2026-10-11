@@ -18,3 +18,13 @@ import_model, save_project.
 
 Edits go through the same undo history as the UI. Edits are refused while the game is playing.
 Suggested flow: get_info -> get_scene -> add_object / set_script (read get_guide first) -> screenshot.
+
+## Materials and cameras
+
+* `get_materials` lists every material (from the model and made in Polystation) with its settings and users.
+* `create_material`, `set_material`, `delete_material`: colour, alpha, texture, `texture_mode` (repeat / stretch /
+  mirror / clamp), `camera` (show a Camera object's view), `tile`, `offset`, `scroll`, `rotate`, `glow`,
+  `brightness`, `cutout`, `hide_back_faces`, `ignore_fog`. `set_material` with `reset: true` puts a model material
+  back to what Blender has.
+* `assign_material` (or `material` on `add_object` / `modify_object`) gives an object a material.
+* `set_game_camera` chooses the scene camera. Camera objects have no colour, material or collision.

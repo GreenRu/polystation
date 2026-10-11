@@ -39,6 +39,13 @@ pub const TEXTURE0: GLenum = 0x84C0;
 pub const TEXTURE1: GLenum = 0x84C1;
 pub const TEXTURE2: GLenum = 0x84C2;
 pub const TEXTURE3: GLenum = 0x84C3;
+pub const TEXTURE4: GLenum = 0x84C4;
+pub const FRAMEBUFFER: GLenum = 0x8D40;
+pub const RENDERBUFFER: GLenum = 0x8D41;
+pub const COLOR_ATTACHMENT0: GLenum = 0x8CE0;
+pub const DEPTH_ATTACHMENT: GLenum = 0x8D00;
+pub const DEPTH_COMPONENT24: GLenum = 0x81A6;
+pub const FRAMEBUFFER_COMPLETE: GLenum = 0x8CD5;
 pub const LINEAR: GLint = 0x2601;
 pub const REPEAT: GLint = 0x2901;
 pub const UNPACK_ALIGNMENT: GLenum = 0x0CF5;
@@ -119,6 +126,14 @@ gl_fns! {
     glBufferData: fn(GLenum, isize, *const c_void, GLenum),
     glVertexAttribPointer: fn(GLuint, GLint, GLenum, u8, GLsizei, *const c_void),
     glEnableVertexAttribArray: fn(GLuint),
+    glGenFramebuffers: fn(GLsizei, *mut GLuint),
+    glBindFramebuffer: fn(GLenum, GLuint),
+    glFramebufferTexture2D: fn(GLenum, GLenum, GLenum, GLuint, GLint),
+    glGenRenderbuffers: fn(GLsizei, *mut GLuint),
+    glBindRenderbuffer: fn(GLenum, GLuint),
+    glRenderbufferStorage: fn(GLenum, GLenum, GLsizei, GLsizei),
+    glFramebufferRenderbuffer: fn(GLenum, GLenum, GLenum, GLuint),
+    glCheckFramebufferStatus: fn(GLenum) -> GLenum,
 }
 
 impl Gl {

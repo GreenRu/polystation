@@ -32,11 +32,14 @@ pub enum Prim {
     Rock,
     /// A light (see the light module). No geometry but a small marker.
     Light,
+    /// A camera object: a viewpoint scripts can look through (`camera("Name")`). It has no model: the editor
+    /// draws an icon that always faces the viewer.
+    Camera,
 }
 
-pub const ALL: [Prim; 18] = [
+pub const ALL: [Prim; 19] = [
     Prim::Cube, Prim::Plane, Prim::Sphere, Prim::Cylinder, Prim::Cone, Prim::Torus, Prim::Terrain, Prim::Particles, Prim::Player,
-    Prim::Capsule, Prim::Pyramid, Prim::Ramp, Prim::Stairs, Prim::Disc, Prim::Arch, Prim::Tree, Prim::Rock, Prim::Light,
+    Prim::Capsule, Prim::Pyramid, Prim::Ramp, Prim::Stairs, Prim::Disc, Prim::Arch, Prim::Tree, Prim::Rock, Prim::Light, Prim::Camera,
 ];
 
 impl Prim {
@@ -61,6 +64,7 @@ impl Prim {
             Prim::Tree => "Tree",
             Prim::Rock => "Rock",
             Prim::Light => "Light",
+            Prim::Camera => "Camera",
         }
     }
 
@@ -98,6 +102,7 @@ impl Prim {
             Prim::Tree => shifted(Shape::Tree.faces(), [0.0, -0.5, 0.0]),
             Prim::Rock => shifted(Shape::Rock.faces(), [0.0, -0.3, 0.0]),
             Prim::Light => crate::light::marker(&Default::default()),
+            Prim::Camera => Vec::new(), // drawn as a billboard icon by the editor, not as a model
         }
     }
 }
@@ -306,7 +311,7 @@ mod tests {
     fn faces_are_outward_and_sane() {
         for p in ALL {
             let faces = p.faces();
-            if p == Prim::Particles {
+            if p == Prim::Particles || p == Prim::Camera {
                 assert!(faces.is_empty());
                 continue;
             }
@@ -315,7 +320,7 @@ mod tests {
             if matches!(p, Prim::Stairs | Prim::Arch | Prim::Tree | Prim::Rock | Prim::Ramp) {
                 continue; // not convex around the origin: only checked for being well formed above
             }
-            if p == Prim::Plane || p == Prim::Terrain || p == Prim::Player || p == Prim::Light {
+            if p == Prim::Plane || p == Prim::Terrain || p == Prim::Player || p == Prim::Light || p == Prim::Camera {
                 continue; // open surfaces
             }
             // closed solids: each polygon normal must point away from the solid
