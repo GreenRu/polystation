@@ -435,7 +435,7 @@ unsafe fn paint(hwnd: isize) {
         fill(dc, 0, 0, w, px(118.0), 0x17181c);
         fill(dc, 0, px(118.0), w, 1, 0x34363e);
         text(dc, f_logo, "POLY", px(36.0), px(18.0), px(200.0), px(44.0), 0xf2f2ff, DT_LEFT | DT_SINGLE);
-        text(dc, f_logo, "STATION", px(36.0) + px(86.0), px(18.0), px(300.0), px(44.0), 0x66a0ff, DT_LEFT | DT_SINGLE);
+        text(dc, f_logo, "STATION", px(36.0) + px(104.0), px(18.0), px(300.0), px(44.0), 0x66a0ff, DT_LEFT | DT_SINGLE);
         text(dc, f_body, if updating { "Update" } else { "Setup" }, px(38.0), px(66.0), px(300.0), px(24.0), 0x9a9ea8, DT_LEFT | DT_SINGLE);
         text(dc, f_small, "a PS1-style 3D engine", px(38.0), px(88.0), px(300.0), px(20.0), 0x6c707a, DT_LEFT | DT_SINGLE);
     }
@@ -720,7 +720,7 @@ fn message(text: &str, flags: u32) -> i32 {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut opt = Options { dir: default_dir(), desktop: true };
+    let mut opt = Options { dir: default_dir(), desktop: false };
     if let Some(i) = args.iter().position(|a| a == "--dir") {
         if let Some(d) = args.get(i + 1) {
             opt.dir = PathBuf::from(d);
@@ -728,7 +728,8 @@ fn main() {
     }
     // an installed copy of this program (polystation-setup.exe next to polystation.exe) updates in place
     if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) {
-        if dir.join("polystation.exe").exists() && !args.iter().any(|a| a == "--dir") {
+        // (only the installed copy: a freshly downloaded setup next to some other polystation.exe must not touch it)
+        if dir.join("polystation.exe").exists() && dir == default_dir() && !args.iter().any(|a| a == "--dir") {
             opt.dir = dir;
         }
     }
