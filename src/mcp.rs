@@ -127,6 +127,18 @@ pub fn png_rgb(w: usize, h: usize, rgb: &[u8]) -> Vec<u8> {
     out
 }
 
+/// A PNG from a bottom-up RGBA read-back of the framebuffer.
+pub fn png_from_gl(w: usize, h: usize, rgba: &[u8]) -> Vec<u8> {
+    let mut rgb = Vec::with_capacity(w * h * 3);
+    for y in (0..h).rev() {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            rgb.extend_from_slice(&rgba[i..i + 3]);
+        }
+    }
+    png_rgb(w, h, &rgb)
+}
+
 pub fn base64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut s = String::with_capacity(data.len().div_ceil(3) * 4);
@@ -496,6 +508,8 @@ impl App {
                     .with("model", self.model_path.as_str())
                     .with("objects", objects)
                     .with("playing", self.play.is_some())
+                    .with("unsaved_changes", self.dirty)
+                    .with("snap", self.snap_on)
                     .with("camera", J::obj().with("position", self.cam.pos).with("yaw_degrees", self.cam.yaw.to_degrees()).with("pitch_degrees", self.cam.pitch.to_degrees()))
                     .with("object_kinds", prims::ALL.iter().map(|p| J::from(p.name())).collect::<Vec<_>>())
                     .with("prefabs", prefabs::PREFABS.iter().map(|p| J::from(p.name)).collect::<Vec<_>>())
@@ -657,6 +671,30 @@ impl App {
                 self.assign_material(&[i], (!mat.is_empty()).then(|| mat.to_string()));
                 Ok(self.describe(i))
             }
+            "drop_to_ground" => {
+                self.require_editing()?;
+                if let Some(n) = args.str("name") {
+                    self.find_object(n).ok_or_else(|| format!("no object named \"{n}\""))?;
+                    self.select_names(&[n.to_string()]);
+                }
+                self.drop_to_ground();
+                let name = self.selected_name().ok_or("select an object or pass name")?;
+                let i = self.find_object(&name).ok_or("object not found")?;
+                Ok(self.describe(i))
+            }
+            "set_view" => {
+                let name = args.str("name").ok_or("name is required")?.to_ascii_lowercase();
+                let k = ["front", "back", "right", "left", "top", "bottom"].iter().position(|v| *v == name).ok_or("name must be front, back, right, left, top or bottom")?;
+                self.standard_view(k);
+                Ok(J::obj().with("position", self.cam.pos).with("yaw_degrees", self.cam.yaw.to_degrees()).with("pitch_degrees", self.cam.pitch.to_degrees()))
+            }
+            "apply_environment_preset" => {
+                self.require_editing()?;
+                let name = args.str("name").ok_or("name is required")?.to_ascii_lowercase();
+                let k = ["classic", "night", "day", "clean"].iter().position(|v| *v == name).ok_or("name must be classic, night, day or clean")?;
+                self.env_preset(k);
+                Ok(J::obj().with("preset", name))
+            }
             "set_game_camera" => {
                 self.require_editing()?;
                 let name = args.str("name").unwrap_or("");
@@ -781,6 +819,9 @@ impl App {
                 }
                 if args.get("ambient").is_some() {
                     e.ambient = parse_color(args, "ambient").ok_or("bad ambient")?;
+                }
+                if let Some(v) = args.num("vertex_snap") {
+                    e.vertex_snap = (v.max(0.0) as u32).min(2048);
                 }
                 if let Some(b) = args.num("color_bits") {
                     e.color_bits = [4u8, 8, 16, 32].into_iter().min_by_key(|x| (*x as f64 - b).abs() as i64).unwrap_or(32);
@@ -963,6 +1004,9 @@ pub fn tool_list() -> Vec<J> {
         tool("create_material", "Makes a new material (shown in the file explorer). Pass any of the settings, or copy_from to start from another material.", &material_props("name", "name of the new material"), &[]),
         tool("delete_material", "Deletes a material made with create_material; objects that used it have no material again.", &[("name", "string", "material to delete")], &["name"]),
         tool("assign_material", "Gives an object a material (empty material = none). Cameras cannot have materials.", &[("object", "string", "object name"), ("material", "string", "material name, or an empty string for none")], &["object", "material"]),
+        tool("drop_to_ground", "Lets an object (or the selection) fall straight down until it rests on the surface below it.", &[("name", "string", "object to drop (default: the selection)")], &[]),
+        tool("set_view", "Moves the editor camera to a standard view of the selection (or the scene).", &[("name", "string", "front | back | right | left | top | bottom")], &["name"]),
+        tool("apply_environment_preset", "Sets fog, sky, ambient light, colour depth and vertex snapping to a ready-made look.", &[("name", "string", "classic | night | day | clean")], &["name"]),
         tool("set_game_camera", "Chooses the Camera object the game looks through from the start (empty name = the player's eyes).", &[("name", "string", "Camera object, or empty")], &[]),
         tool("get_gui", "The game's GUI elements (text, panels, bars, buttons) in drawing order.", &[], &[]),
         tool("set_gui_mode", "How the mouse works while the game plays: look (mouse turns the camera, no clicking), cursor (a pointer that clicks buttons), toggle (look, Tab switches the pointer) or hold (look, hold Ctrl for the pointer).", &[("mode", "string", "look | cursor | toggle | hold")], &["mode"]),
@@ -984,7 +1028,7 @@ pub fn tool_list() -> Vec<J> {
         tool(
             "set_environment",
             "Sets fog, sky and ambient light.",
-            &[("fog", "string", "off | smooth | dithered"), ("fog_color", "color", "[r,g,b] or \"#rrggbb\""), ("sky_color", "color", "solid sky color"), ("ambient", "color", "ambient light color"), ("ambient_strength", "number", "ambient multiplier, 0 - 8 (1 = as is)"), ("color_bits", "number", "colour depth: 4, 8, 16 or 32 bits"), ("fog_start", "number", "in scene radii"), ("fog_end", "number", "in scene radii")],
+            &[("fog", "string", "off | smooth | dithered"), ("fog_color", "color", "[r,g,b] or \"#rrggbb\""), ("sky_color", "color", "solid sky color"), ("ambient", "color", "ambient light color"), ("ambient_strength", "number", "ambient multiplier, 0 - 8 (1 = as is)"), ("color_bits", "number", "colour depth: 4, 8, 16 or 32 bits"), ("vertex_snap", "number", "PS1 vertex wobble: vertices snap to a grid this many pixels wide (0 = off, 320 is typical)"), ("fog_start", "number", "in scene radii"), ("fog_end", "number", "in scene radii")],
             &[],
         ),
         tool(
@@ -1105,6 +1149,15 @@ mod tests {
         assert_eq!(base64(b"Man"), "TWFu");
         assert_eq!(base64(b"Ma"), "TWE=");
         assert_eq!(base64(b"M"), "TQ==");
+    }
+
+    #[test]
+    fn gl_png_flips_and_keeps_the_pixels() {
+        // 2 x 2, bottom row first as OpenGL returns it: bottom = red, green; top = blue, white
+        let rgba = [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255];
+        let a = crate::image::decode_png(&png_from_gl(2, 2, &rgba)).unwrap();
+        assert_eq!((a.w, a.h), (2, 2));
+        assert_eq!(&a.rgba[0..3], &[255, 0, 0], "the bottom-left pixel stays the bottom-left pixel");
     }
 
     #[test]

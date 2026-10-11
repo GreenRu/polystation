@@ -154,7 +154,7 @@ fn start_menu() -> PathBuf {
 
 fn shortcut(lnk: &str, target: &Path, dir: &Path) -> bool {
     powershell(&format!(
-        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut({lnk}); $s.TargetPath='{t}'; $s.WorkingDirectory='{d}'; $s.Description='Polystation: a PS1-style 3D engine'; $s.Save()",
+        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut({lnk}); $s.TargetPath='{t}'; $s.WorkingDirectory='{d}'; $s.IconLocation='{t},0'; $s.Description='Polystation: a PS1-style 3D engine'; $s.Save()",
         t = target.display().to_string().replace('\'', "''"),
         d = dir.display().to_string().replace('\'', "''"),
     ))
@@ -229,6 +229,7 @@ fn register(exe: &Path, setup: &Path, dir: &Path, version: &str) {
     reg(&[key, "/v", "UninstallString", "/d", &format!("\"{setup}\" --uninstall")]);
     reg(&[key, "/v", "NoModify", "/t", "REG_DWORD", "/d", "1"]);
     reg(&[key, "/v", "NoRepair", "/t", "REG_DWORD", "/d", "1"]);
+    unsafe { SHChangeNotify(0x0800_0000, 0, std::ptr::null(), std::ptr::null()) }; // file icons: look again
 }
 
 /// Everything Polystation leaves outside its own folder: settings, the recent list, cached files of
@@ -339,6 +340,7 @@ unsafe extern "system" {
     fn DispatchMessageW(msg: *const MSG) -> isize;
     fn PostQuitMessage(code: i32);
     fn LoadCursorW(inst: isize, name: usize) -> isize;
+    fn LoadIconW(inst: isize, name: usize) -> isize;
     fn BeginPaint(h: isize, ps: *mut PAINTSTRUCT) -> isize;
     fn EndPaint(h: isize, ps: *const PAINTSTRUCT) -> i32;
     fn GetClientRect(h: isize, r: *mut RECT) -> i32;
@@ -356,6 +358,45 @@ unsafe extern "system" {
     fn DestroyWindow(h: isize) -> i32;
 }
 
+#[repr(C)]
+struct BITMAPINFOHEADER {
+    size: u32,
+    width: i32,
+    height: i32,
+    planes: u16,
+    bit_count: u16,
+    compression: u32,
+    size_image: u32,
+    x_ppm: i32,
+    y_ppm: i32,
+    clr_used: u32,
+    clr_important: u32,
+}
+
+#[link(name = "shell32")]
+unsafe extern "system" {
+    fn SHChangeNotify(event: i32, flags: u32, a: *const c_void, b: *const c_void);
+}
+
+/// The logo: 47 x 47 RGBA pixels, top row first.
+const LOGO: &[u8] = include_bytes!("../assets/logo47.rgba");
+
+/// Draws the logo at (x, y), `k` times its size, over a background colour (0xRRGGBB).
+unsafe fn draw_logo(dc: isize, x: i32, y: i32, k: i32, bg: u32) {
+    let bg = [(bg >> 16) as u32 & 255, (bg >> 8) as u32 & 255, bg & 255];
+    let mut bgra: Vec<u32> = Vec::with_capacity(47 * 47);
+    for p in LOGO.chunks_exact(4) {
+        let a = p[3] as u32;
+        let mix = |c: u8, b: u32| (c as u32 * a + b * (255 - a)) / 255;
+        bgra.push(mix(p[2], bg[2]) | mix(p[1], bg[1]) << 8 | mix(p[0], bg[0]) << 16);
+    }
+    let info = BITMAPINFOHEADER { size: 40, width: 47, height: -47, planes: 1, bit_count: 32, compression: 0, size_image: 0, x_ppm: 0, y_ppm: 0, clr_used: 0, clr_important: 0 };
+    unsafe {
+        SetStretchBltMode(dc, 3); // COLORONCOLOR: sharp pixels
+        StretchDIBits(dc, x, y, 47 * k, 47 * k, 0, 0, 47, 47, bgra.as_ptr() as *const c_void, &info, 0, 0x00CC0020);
+    }
+}
+
 #[link(name = "gdi32")]
 unsafe extern "system" {
     fn CreateCompatibleDC(dc: isize) -> isize;
@@ -366,6 +407,8 @@ unsafe extern "system" {
     fn BitBlt(dst: isize, x: i32, y: i32, w: i32, h: i32, src: isize, sx: i32, sy: i32, rop: u32) -> i32;
     fn CreateSolidBrush(color: u32) -> isize;
     fn SetBkMode(dc: isize, mode: i32) -> i32;
+    fn SetStretchBltMode(dc: isize, mode: i32) -> i32;
+    fn StretchDIBits(dc: isize, xd: i32, yd: i32, wd: i32, hd: i32, xs: i32, ys: i32, ws: i32, hs: i32, bits: *const c_void, info: *const BITMAPINFOHEADER, usage: u32, rop: u32) -> i32;
     fn SetTextColor(dc: isize, color: u32) -> u32;
     fn CreateFontW(h: i32, w: i32, esc: i32, orient: i32, weight: i32, italic: u32, underline: u32, strike: u32, charset: u32, out: u32, clip: u32, quality: u32, pitch: u32, face: *const u16) -> isize;
 }
@@ -451,10 +494,13 @@ unsafe fn paint(hwnd: isize) {
         fill(dc, 0, 0, w, h, 0x1e1f24);
         fill(dc, 0, 0, w, px(118.0), 0x17181c);
         fill(dc, 0, px(118.0), w, 1, 0x34363e);
-        text(dc, f_logo, "POLY", px(36.0), px(18.0), px(200.0), px(44.0), 0xf2f2ff, DT_LEFT | DT_SINGLE);
-        text(dc, f_logo, "STATION", px(36.0) + px(104.0), px(18.0), px(300.0), px(44.0), 0x66a0ff, DT_LEFT | DT_SINGLE);
-        text(dc, f_body, if updating { "Update" } else { "Setup" }, px(38.0), px(66.0), px(300.0), px(24.0), 0x9a9ea8, DT_LEFT | DT_SINGLE);
-        text(dc, f_small, "a PS1-style 3D engine", px(38.0), px(88.0), px(300.0), px(20.0), 0x6c707a, DT_LEFT | DT_SINGLE);
+        let k = ((98.0 * s / 47.0).floor() as i32).max(1); // the logo at a whole-number scale, inside the header
+        draw_logo(dc, px(32.0), (px(118.0) - 47 * k) / 2, k, 0x17181c);
+        let tx = px(32.0) + 47 * k + px(20.0);
+        text(dc, f_logo, "POLY", tx, px(18.0), px(200.0), px(44.0), 0xf2f2ff, DT_LEFT | DT_SINGLE);
+        text(dc, f_logo, "STATION", tx + px(104.0), px(18.0), px(300.0), px(44.0), 0x66a0ff, DT_LEFT | DT_SINGLE);
+        text(dc, f_body, if updating { "Update" } else { "Setup" }, tx + px(2.0), px(66.0), px(300.0), px(24.0), 0x9a9ea8, DT_LEFT | DT_SINGLE);
+        text(dc, f_small, "a PS1-style 3D engine", tx + px(2.0), px(88.0), px(300.0), px(20.0), 0x6c707a, DT_LEFT | DT_SINGLE);
     }
 
     let mut buttons: Vec<(usize, [i32; 4])> = Vec::new();
@@ -708,7 +754,7 @@ fn run_window(opt: Options) {
         start_check(shared);
         let inst = GetModuleHandleW(std::ptr::null());
         let class = wide("PolystationSetup");
-        let wc = WNDCLASSW { style: 0, proc_, cls_extra: 0, wnd_extra: 0, inst, icon: 0, cursor: LoadCursorW(0, 32512), background: 0, menu: std::ptr::null(), class: class.as_ptr() };
+        let wc = WNDCLASSW { style: 0, proc_, cls_extra: 0, wnd_extra: 0, inst, icon: LoadIconW(inst, 1), cursor: LoadCursorW(0, 32512), background: 0, menu: std::ptr::null(), class: class.as_ptr() };
         RegisterClassW(&wc);
         let style = 0x00C0_0000 | 0x0008_0000 | 0x0002_0000; // CAPTION | SYSMENU | MINIMIZEBOX
         let (cw, ch) = ((560.0 * scale) as i32, (400.0 * scale) as i32);

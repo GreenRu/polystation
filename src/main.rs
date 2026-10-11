@@ -68,6 +68,7 @@ uniform vec4 lPos[16];       // xyz position, w: 0 point, 1 spot, 2 sun
 uniform vec4 lCol[16];       // rgb color * intensity, w: range
 uniform vec4 lDir[16];       // xyz direction the light shines in, w: cos of the spot half angle
 uniform vec3 ambient;
+uniform vec2 vsnap;          // vertex snapping grid in pixels (0 = off)
 smooth out vec3 v_lit;
 smooth out vec2 v_uv_p;
 noperspective out vec2 v_uv_a;
@@ -104,7 +105,13 @@ void main() {
         // water: the top of the volume ripples
         wp.y += sin(time * 1.6 + wp.x * 0.9 + wp.z * 0.7) * 0.05 + sin(time * 2.3 - wp.x * 0.5 + wp.z * 1.1) * 0.03;
     }
-    gl_Position = (st == 1.0) ? vec4(2.0, 2.0, 2.0, 1.0) : mvp * wp; // hidden: outside the view
+    vec4 clip = (st == 1.0) ? vec4(2.0, 2.0, 2.0, 1.0) : mvp * wp; // hidden: outside the view
+    if (vsnap.x > 0.0 && clip.w > 0.001) {
+        // the PS1 had no sub-pixel precision: vertices jump from pixel to pixel
+        vec2 res = vsnap * 0.5;
+        clip.xy = floor(clip.xy / clip.w * res + 0.5) / res * clip.w;
+    }
+    gl_Position = clip;
     v_uv_p = uv;
     v_uv_a = uv;
     v_n = mat3(m) * nrm;
@@ -1224,6 +1231,34 @@ const MODEL_FILTER: [(&str, &str); 2] = [
     ("All files", "*.*"),
 ];
 const BMP_FILTER: [(&str, &str); 1] = [("Bitmap (*.bmp)", "*.bmp")];
+const SHOT_FILTER: [(&str, &str); 2] = [("PNG image (*.png)", "*.png"), ("Bitmap (*.bmp)", "*.bmp")];
+
+const SHORTCUTS_TEXT: &str = "Ctrl+N / O / S / Shift+S   new, open, save, save as
+Ctrl+Z / Y                 undo / redo
+Ctrl+D  Del  H  Alt+H      duplicate, delete, hide, show all
+Ctrl+A  Esc                select all / none
+Q R T Y                    gizmo: none, move, rotate, scale
+G                          snap on / off (Ctrl does the opposite)
+End                        drop the selection onto the surface below
+F  Shift+F                 frame the selection / everything
+Numpad 1 3 7               front, right, top view (Ctrl: back, left, bottom)
+1 - 6                      view modes
+[ ]  , .                   fog distance, dither size
+Right mouse + W A S D      fly the camera
+F5                         play / stop (Esc stops too)
+F12                        save a screenshot (PNG)
+F1                         this list
+
+In a compiled game: Esc pauses, then Esc resumes or Q quits.";
+
+/// Writes a screenshot: a PNG, or a BMP when the name ends in .bmp.
+fn shot_write(path: &str, w: i32, h: i32, px: &[u8]) -> Result<(), String> {
+    if path.to_ascii_lowercase().ends_with(".bmp") {
+        atlas::write_bmp(path, w as usize, h as usize, px)
+    } else {
+        std::fs::write(path, mcp::png_from_gl(w as usize, h as usize, px)).map_err(|e| e.to_string())
+    }
+}
 const IMAGE_FILTER: [(&str, &str); 2] = [("Images (*.bmp, *.png, *.jpg, *.tga, *.tif)", "*.bmp;*.png;*.jpg;*.jpeg;*.tga;*.tif;*.tiff"), ("All files", "*.*")];
 
 /// Everything play mode needs while it runs.
@@ -1506,6 +1541,18 @@ impl script::Host for PlayHost<'_> {
         self.app.cursor_override = free; // the frame loop applies it
     }
 
+    fn quit_game(&mut self) {
+        self.app.script_quit = true;
+    }
+
+    fn save_value(&mut self, key: &str, v: &script::Value) -> Result<(), String> {
+        self.app.save_data_set(key, v)
+    }
+
+    fn load_value(&self, key: &str) -> Option<script::Value> {
+        self.app.save_data_get(key)
+    }
+
     fn mouse_lock(&mut self, on: bool) {
         self.app.window.lock_cursor(on);
     }
@@ -1684,6 +1731,21 @@ struct App {
     /// explorer was last built for.
     sel_mat: Option<String>,
     mat_lib_key: Vec<(String, bool)>,
+    /// The edits as last saved / loaded (None: take the next ones), and whether the project has unsaved changes.
+    saved_edits: Option<Edits>,
+    dirty: bool,
+    dirty_t: Instant,
+    autosave_t: Instant,
+    /// Gizmo snapping stays on (Ctrl then does the opposite).
+    snap_on: bool,
+    /// A compiled game is paused (Esc).
+    paused: bool,
+    /// A script called quit().
+    script_quit: bool,
+    /// The project being opened comes from an autosave: it counts as changed.
+    recovered: bool,
+    /// Name of the compiled game (where its saved values go).
+    game_title: String,
     /// Chunk the camera is in, per added object (only chunked terrains care).
     terrain_views: Vec<(i32, i32)>,
     /// Rubber-band selection rectangle (start, current) in canvas pixels.
@@ -1724,6 +1786,7 @@ struct Locs {
     mode: i32,
     affine: i32,
     cull_on: i32,
+    vsnap: i32,
     cam: i32,
     fog: i32,
     fog_range: i32,
@@ -1947,7 +2010,7 @@ impl App {
             let locs = Locs {
                 n_lights: loc(b"nLights\0"), l_pos: loc(b"lPos\0"), l_col: loc(b"lCol\0"), l_dir: loc(b"lDir\0"), ambient: loc(b"ambient\0"),
                 time: loc(b"time\0"),
-                mvp: loc(b"mvp\0"), cutoff: loc(b"cutoff\0"), mode: loc(b"mode\0"), affine: loc(b"affine\0"), cull_on: loc(b"cullOn\0"),
+                mvp: loc(b"mvp\0"), cutoff: loc(b"cutoff\0"), mode: loc(b"mode\0"), affine: loc(b"affine\0"), cull_on: loc(b"cullOn\0"), vsnap: loc(b"vsnap\0"),
                 cam: loc(b"cam\0"), fog: loc(b"fog\0"), fog_range: loc(b"fogRange\0"), draw_pass: loc(b"drawPass\0"), dither: loc(b"ditherCell\0"), fog_color: loc(b"fogColor\0"), fog_steps: loc(b"fogSteps\0"),
             };
             (g.glUniform1i)(loc(b"atlas\0"), 0);
@@ -1980,7 +2043,7 @@ impl App {
             let grid_locs = Locs {
                 n_lights: 0, l_pos: 0, l_col: 0, l_dir: 0, ambient: 0,
                 time: 0,
-                mvp: gloc(b"mvp\0"), cutoff: 0, mode: 0, affine: 0, cull_on: 0,
+                mvp: gloc(b"mvp\0"), cutoff: 0, mode: 0, affine: 0, cull_on: 0, vsnap: 0,
                 cam: gloc(b"cam\0"), fog: gloc(b"fog\0"), fog_range: gloc(b"fogRange\0"), draw_pass: 0, dither: gloc(b"ditherCell\0"), fog_color: gloc(b"fogColor\0"), fog_steps: gloc(b"fogSteps\0"),
             };
 
@@ -2043,7 +2106,7 @@ impl App {
                 model_path, atlas_arg, project_path, watcher, tx, imports, base_atlas,
                 objects_dirty: true, details_dirty: true, look_active: false, rmb: None, play: None, script_hidden: HashSet::new(), script_vars: HashMap::new(), hud: String::new(), underwater: false, play_hidden: HashSet::new(), press: None, orbit: None, last_mouse: None,
                 poll_t: Instant::now(), status_t: Instant::now() - Duration::from_secs(1), fps: 60.0, shot: None, shot_waiters: Vec::new(), game_mode: false, script_undo: None, cam_fbo, cam_tex, uv_boxes: Vec::new(), camera_tiles: Vec::new(), compass_drag: None, surf: None, play_camera: None, cursor_free: false, cursor_override: None, tab_free: false, tab_prev: false, gui_clicks: Vec::new(), gui_mouse: (0.0, 0.0), gui_down: false, build: startup.as_ref().map(|s| s.build.clone()).unwrap_or_default(), settings: settings::Settings::load(),
-                gizmo: Gizmo::Move, drag: None, hover: None, box_sel: None, explorer_dir: PathBuf::new(), explorer_items: Vec::new(), sel_mat: None, mat_lib_key: Vec::new(), terrain_views: Vec::new(), last_mvp: math::identity(), gizmo_vao, gizmo_vbo,
+                gizmo: Gizmo::Move, drag: None, hover: None, box_sel: None, explorer_dir: PathBuf::new(), explorer_items: Vec::new(), sel_mat: None, mat_lib_key: Vec::new(), saved_edits: None, dirty: false, dirty_t: Instant::now(), autosave_t: Instant::now(), snap_on: false, paused: false, script_quit: false, recovered: false, game_title: String::new(), terrain_views: Vec::new(), last_mvp: math::identity(), gizmo_vao, gizmo_vbo,
                 grid_inf_prog, grid_inf, sky_prog, sky_vao, sky_locs, sky_tex, sky_loaded: None,
                 particle_prog, particle_locs, t0: Instant::now(),
                 user_tex, utex_rects: HashMap::new(), utex_key: Vec::new(), utex_cache: HashMap::new(), tex_tx,
@@ -2132,7 +2195,117 @@ impl App {
     fn title(&self) -> String {
         let source = self.project_path.as_deref().unwrap_or(Path::new(&self.model_path));
         let name = source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        format!("{name} - Polystation")
+        format!("{}{name} - Polystation", if self.dirty { "* " } else { "" })
+    }
+
+    /// Where the autosave of a project goes (next to the settings, not in the project folder).
+    fn autosave_path(project: &Path) -> PathBuf {
+        let abs = std::path::absolute(project).unwrap_or_else(|_| project.to_path_buf());
+        let h = abs.to_string_lossy().bytes().fold(0x811c9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x01000193));
+        let stem = project.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "project".into());
+        let dir = settings::Settings::path().parent().map(|p| p.join("autosave")).unwrap_or_else(std::env::temp_dir);
+        dir.join(format!("{stem}-{h:08x}.polystation"))
+    }
+
+    /// Notices changes since the last save (title gets a *), and autosaves them every two minutes.
+    fn update_dirty(&mut self) {
+        if self.play.is_some() || self.game_mode {
+            return; // scripts change the scene while playing
+        }
+        let Some(saved) = &self.saved_edits else {
+            self.saved_edits = Some(self.edits.clone());
+            return;
+        };
+        let dirty = *saved != self.edits;
+        if dirty != self.dirty {
+            self.dirty = dirty;
+            self.window.set_title(&self.title());
+        }
+        if self.dirty && self.autosave_t.elapsed() > Duration::from_secs(120) {
+            self.autosave_t = Instant::now();
+            if let Some(p) = self.project_path.clone() {
+                let auto = Self::autosave_path(&p);
+                if let Some(dir) = auto.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                if project::save(&auto, &self.snapshot()).is_ok() {
+                    self.status_note("Autosaved");
+                }
+            }
+        }
+    }
+
+    /// Before the project is closed or replaced: offers to save unsaved changes. False = the user cancelled.
+    fn confirm_discard(&mut self) -> bool {
+        if self.game_mode || self.play.is_some() {
+            return true;
+        }
+        let dirty = self.saved_edits.as_ref().is_some_and(|s| *s != self.edits);
+        let auto = self.project_path.as_deref().map(Self::autosave_path);
+        if !dirty {
+            if let Some(a) = &auto {
+                let _ = std::fs::remove_file(a);
+            }
+            return true;
+        }
+        let name = self.title().trim_start_matches("* ").trim_end_matches(" - Polystation").to_string();
+        match self.window.ask3("Unsaved changes", &format!("{name} has changes that are not saved."), ["Save", "Don't Save", "Cancel"]) {
+            Some(0) => {
+                self.save_project(false);
+                let saved = self.saved_edits.as_ref().is_some_and(|s| *s == self.edits);
+                saved
+            }
+            Some(1) => {
+                if let Some(a) = &auto {
+                    let _ = std::fs::remove_file(a);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    // ---------------------------------------------------------------- values a game keeps between runs
+    fn save_file(&self) -> PathBuf {
+        let id = if self.game_mode { self.game_title.clone() } else { self.project_path.as_deref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "scene".into()) };
+        let id: String = id.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+        settings::Settings::path().parent().map(|p| p.join("saves")).unwrap_or_else(std::env::temp_dir).join(format!("{id}.sav"))
+    }
+
+    fn read_saved(&self) -> Vec<(String, String)> {
+        std::fs::read_to_string(self.save_file()).unwrap_or_default().lines().filter_map(|l| l.split_once('\t').map(|(k, v)| (k.to_string(), v.to_string()))).collect()
+    }
+
+    fn save_data_get(&self, key: &str) -> Option<script::Value> {
+        let (_, v) = self.read_saved().into_iter().find(|(k, _)| k == key)?;
+        let (kind, rest) = v.split_once(':')?;
+        match kind {
+            "n" => rest.parse().ok().map(script::Value::Num),
+            "s" => Some(script::Value::Str(rest.to_string())),
+            "b" => Some(script::Value::Bool(rest == "1")),
+            _ => None,
+        }
+    }
+
+    fn save_data_set(&mut self, key: &str, v: &script::Value) -> Result<(), String> {
+        let text = match v {
+            script::Value::Num(n) => format!("n:{n}"),
+            script::Value::Str(s) => format!("s:{}", s.replace(['\t', '\n', '\r'], " ")),
+            script::Value::Bool(b) => format!("b:{}", *b as u8),
+            _ => return Err("only numbers, text and true / false can be saved".into()),
+        };
+        let key = key.replace(['\t', '\n', '\r'], " ");
+        let mut all = self.read_saved();
+        match all.iter_mut().find(|(k, _)| *k == key) {
+            Some(e) => e.1 = text,
+            None => all.push((key, text)),
+        }
+        let path = self.save_file();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let body: String = all.iter().map(|(k, v)| format!("{k}\t{v}\n")).collect();
+        std::fs::write(&path, body).map_err(|e| format!("could not save: {e}"))
     }
 
     fn snapshot(&self) -> ProjectState {
@@ -2193,6 +2366,8 @@ impl App {
                 self.atlas_arg = msg.atlas_arg;
                 self.project_path = project;
                 self.edits = Edits::default();
+                self.saved_edits = if std::mem::take(&mut self.recovered) { Some(Edits::default()) } else { None };
+                self.dirty = false;
                 self.undo.clear();
                 self.redo.clear();
                 self.speed_mul = 1.0;
@@ -2398,7 +2573,25 @@ impl App {
     }
 
     fn open_project_path(&mut self, file: String) {
-        match project::load(Path::new(&file)) {
+        if !self.confirm_discard() {
+            return;
+        }
+        // work that was never saved (the editor closed unexpectedly) can be recovered
+        let auto = Self::autosave_path(Path::new(&file));
+        let newer = matches!((std::fs::metadata(&auto).and_then(|m| m.modified()), std::fs::metadata(&file).and_then(|m| m.modified())), (Ok(a), Ok(p)) if a > p);
+        let from = if newer {
+            let name = Path::new(&file).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if self.window.confirm("Recover unsaved work?", &format!("Polystation found changes to {name} that were never saved (the editor closed unexpectedly). Recover them?"), "Recover", "Discard") {
+                self.recovered = true;
+                auto
+            } else {
+                let _ = std::fs::remove_file(&auto);
+                PathBuf::from(&file)
+            }
+        } else {
+            PathBuf::from(&file)
+        };
+        match project::load(&from) {
             Ok(st) => {
                 settings::add_recent(&file);
                 self.window.set_title("Loading... - Polystation");
@@ -2430,7 +2623,10 @@ impl App {
                     self.explorer_dir = dir;
                     self.explorer_refresh();
                 }
+                let _ = std::fs::remove_file(Self::autosave_path(&path));
                 self.project_path = Some(path);
+                self.saved_edits = Some(self.edits.clone());
+                self.dirty = false;
                 self.window.set_title(&self.title());
             }
             Err(e) => self.window.message(&format!("Could not save the project:\n\n{e}")),
@@ -3087,7 +3283,7 @@ impl App {
     fn update_drag(&mut self, mx: i32, my: i32) {
         let Some(d) = self.drag.clone() else { return };
         let ray = self.ray(mx, my);
-        let snap = win32::key_down(0x11); // Ctrl snaps
+        let snap = win32::key_down(0x11) != self.snap_on; // Ctrl snaps (or stops snapping when snapping is on)
         let c = d.center;
         let (mut delta, mut factor, mut rot) = (0.0f32, 1.0f32, None);
         match (d.mode, d.handle) {
@@ -4052,6 +4248,8 @@ impl App {
         self.cursor_override = None;
         self.tab_free = false;
         self.tab_prev = win32::key_down(0x09);
+        self.paused = false;
+        self.window.set_paused(false);
         self.window.set_text(win32::CMD_PLAY, "Stop");
         self.script_hidden.clear();
         self.script_vars.clear();
@@ -4067,6 +4265,8 @@ impl App {
         let Some(ps) = self.play.take() else { return };
         self.window.stop_sound();
         self.window.reset_game_mouse();
+        self.paused = false;
+        self.window.set_paused(false);
         self.window.set_playing(false);
         self.play_camera = None;
         self.cursor_free = false;
@@ -4100,6 +4300,9 @@ impl App {
 
     /// One frame of play mode: mouse look, walking, footsteps, and the camera follows the player's eyes.
     fn play_frame(&mut self, dt: f32) {
+        if self.paused {
+            return;
+        }
         let Some(mut ps) = self.play.take() else { return };
         let (dx, dy) = if self.cursor_free { (0, 0) } else { self.window.look_delta() };
         let sens = ps.params.mouse_sens.to_radians();
@@ -4230,6 +4433,13 @@ impl App {
                 }
             }
         }
+        if self.paused {
+            let s = c.s;
+            c.r.fill(vp[0], vp[1], vp[2], vp[3], [0.0, 0.0, 0.0, 0.6]);
+            let font = &c.f.bold;
+            c.text_center(font, "PAUSED", vp[0], vp[1] + vp[3] * 0.4, vp[2], 44.0 * s, [1.0; 4]);
+            c.text_center(font, "Esc: resume      Q: quit", vp[0], vp[1] + vp[3] * 0.4 + 54.0 * s, vp[2], 30.0 * s, [0.8, 0.8, 0.85, 1.0]);
+        }
         if self.game_mode {
             if self.build.show_fps {
                 let s = c.s;
@@ -4246,6 +4456,82 @@ impl App {
                 c.text_in(font, &self.hud, vp[0] + 16.0 * s, vp[1] + 10.0 * s, 24.0 * s, [1.0, 1.0, 1.0, 1.0]);
             }
         }
+    }
+
+    /// Looks at the selection (or the scene) from the front, back, right, left, top or bottom.
+    fn standard_view(&mut self, k: usize) {
+        const VIEWS: [(&str, f32, f32); 6] = [("Front", 0.0, 0.0), ("Back", std::f32::consts::PI, 0.0), ("Right", -std::f32::consts::FRAC_PI_2, 0.0), ("Left", std::f32::consts::FRAC_PI_2, 0.0), ("Top", 0.0, -1.55), ("Bottom", 0.0, 1.55)];
+        let (name, yaw, pitch) = VIEWS[k.min(5)];
+        let (pivot, radius) = self.ex.selected.map_or((self.base.center, self.base.radius), |s| self.world_bounds(s));
+        let d = math::sub(self.cam.pos, pivot);
+        let dist = math::dot(d, d).sqrt().max(radius * 2.0).max(0.5);
+        self.cam = Cam::looking_at(pivot, dist, yaw, pitch);
+        self.status_note(&format!("{name} view"));
+    }
+
+    /// Lets the selected objects fall straight down until they rest on the surface below them.
+    fn drop_to_ground(&mut self) {
+        let objs = self.selected_objects();
+        if objs.is_empty() {
+            return self.status_note("Select an object first");
+        }
+        let mut moves = Vec::new();
+        for &i in &objs {
+            let mut set: HashSet<usize> = hier::descendants(&self.mesh.nodes, i).into_iter().collect();
+            set.insert(i);
+            let mats: HashMap<usize, math::Mat4> = set
+                .iter()
+                .filter(|&&j| self.mesh.nodes[j].kind == obj::Kind::Object)
+                .map(|&j| {
+                    let x = &self.rt.xf[j];
+                    (j, math::model_matrix(x.pos, x.rot, x.scale, self.mesh.nodes[j].center))
+                })
+                .collect();
+            let (mut lo, mut hi, mut any) = ([f32::MAX; 3], [f32::MIN; 3], false);
+            for v in self.mesh.data.chunks_exact(obj::FLOATS) {
+                let Some(m) = mats.get(&self.mesh.object_of(v[obj::FLOATS - 1] as usize)) else { continue };
+                let p = math::transform_point(m, [v[0], v[1], v[2]]);
+                for k in 0..3 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+                any = true;
+            }
+            if !any {
+                continue; // nothing to land (a light, a camera ...)
+            }
+            let origin = [(lo[0] + hi[0]) * 0.5, lo[1] + 0.01, (lo[2] + hi[2]) * 0.5];
+            if let Some((t, _)) = self.ray_scene(origin, [0.0, -1.0, 0.0], &set) {
+                let mut x = self.rt.xf[i];
+                x.pos[1] -= t - 0.01;
+                moves.push((i, x));
+            }
+        }
+        if moves.is_empty() {
+            return self.status_note("Nothing below to land on");
+        }
+        self.push_undo();
+        self.set_xforms(&moves);
+        self.details_dirty = true;
+        self.status_note(&format!("Dropped {} object(s) to the ground", moves.len()));
+    }
+
+    /// One-click looks for the environment: Classic PS1, Night, Day, Clean.
+    fn env_preset(&mut self, k: usize) {
+        self.push_undo();
+        let keep = self.edits.env.render_distance;
+        let sky = |kind, solid, top, bottom| scene::Sky { kind, solid, top, bottom, texture: None };
+        let name = ["Classic PS1", "Night", "Day", "Clean"][k.min(3)];
+        let e = match k {
+            0 => scene::Environment { fog: 2, fog_color: [0.16, 0.17, 0.25], fog_start: 1.2, fog_end: 6.0, dither: 3.0, steps: 4, ambient: [0.4; 3], color_bits: 16, vertex_snap: 320, sky: sky(SkyKind::Solid, [0.16, 0.17, 0.25], [0.12, 0.2, 0.42], [0.55, 0.62, 0.75]), ..scene::Environment::default() },
+            1 => scene::Environment { fog: 2, fog_color: [0.02, 0.03, 0.07], fog_start: 0.5, fog_end: 4.5, dither: 3.0, steps: 4, ambient: [0.1, 0.12, 0.2], color_bits: 16, vertex_snap: 320, sky: sky(SkyKind::Solid, [0.02, 0.03, 0.07], [0.12, 0.2, 0.42], [0.55, 0.62, 0.75]), ..scene::Environment::default() },
+            2 => scene::Environment { fog: 1, fog_color: [0.72, 0.82, 0.95], fog_start: 3.0, fog_end: 14.0, ambient: [0.5; 3], color_bits: 32, vertex_snap: 0, sky: sky(SkyKind::Gradient, [0.3, 0.5, 0.9], [0.3, 0.5, 0.9], [0.72, 0.82, 0.95]), ..scene::Environment::default() },
+            _ => scene::Environment::default(),
+        };
+        self.edits.env = scene::Environment { render_distance: keep, ..e };
+        self.objects_dirty = true;
+        self.details_dirty = true;
+        self.status_note(&format!("Environment: {name}"));
     }
 
     /// "Compile Game...": asks where to put the executable and builds it.
@@ -4313,6 +4599,9 @@ impl App {
         if project::is_project_file(path) {
             self.open_project_path(path.to_string());
         } else {
+            if !self.confirm_discard() {
+                return;
+            }
             self.window.set_title("Loading... - Polystation");
             spawn_load(self.tx.clone(), path.to_string(), None, Vec::new(), Intent::Replace { state: None, project: None });
         }
@@ -4366,8 +4655,8 @@ impl App {
             win32::CMD_SAVE => self.save_project(false),
             win32::CMD_SAVE_AS => self.save_project(true),
             win32::CMD_IMPORT => self.import_model(),
-            win32::CMD_SCREENSHOT => self.shot = self.window.file_dialog(true, &BMP_FILTER, "bmp", "screenshot.bmp"),
-            win32::CMD_EXIT => return true,
+            win32::CMD_SCREENSHOT => self.shot = self.window.file_dialog(true, &SHOT_FILTER, "png", "screenshot.png"),
+            win32::CMD_EXIT => return self.confirm_discard(),
             win32::CMD_SETTINGS => self.open_settings(),
             win32::CMD_MAT_COLOR => {
                 if let Some(name) = self.current_material() {
@@ -4585,6 +4874,20 @@ Download it from the GitHub releases page to install and update."),
             win32::CMD_FRAME_SEL => self.frame_selected(),
             win32::CMD_FRAME_ALL => self.frame_all(),
             win32::CMD_AFFINE => self.view.affine = !self.view.affine,
+            win32::CMD_SNAP => {
+                self.snap_on = !self.snap_on;
+                self.status_note(if self.snap_on { "Snapping on (hold Ctrl to move freely)" } else { "Snapping off (hold Ctrl to snap)" });
+            }
+            win32::CMD_DROP => self.drop_to_ground(),
+            win32::CMD_SHORTCUTS => self.window.message(SHORTCUTS_TEXT),
+            win32::CMD_PAUSE => {
+                if self.game_mode && self.play.is_some() {
+                    self.paused = !self.paused;
+                    self.window.set_paused(self.paused);
+                }
+            }
+            c if (win32::CMD_VIEW_BASE..win32::CMD_VIEW_BASE + 6).contains(&c) => self.standard_view((c - win32::CMD_VIEW_BASE) as usize),
+            c if (win32::CMD_PRESET_BASE..win32::CMD_PRESET_BASE + 4).contains(&c) => self.env_preset((c - win32::CMD_PRESET_BASE) as usize),
             win32::CMD_GRID => self.view.grid = !self.view.grid,
             win32::CMD_CULL => self.view.cull = !self.view.cull,
             win32::CMD_DITHER_FINER | win32::CMD_DITHER_CHUNKIER => {
@@ -5163,6 +5466,7 @@ Download it from the GitHub releases page to install and update."),
         w.set_text(win32::ED_DITHER, &fmt_f(e.dither));
         w.set_text(win32::ED_STEPS, &e.steps.to_string());
         w.set_text(win32::ED_RENDER_DIST, &fmt_f(e.render_distance));
+        w.set_text(win32::ED_VSNAP, &e.vertex_snap.to_string());
         w.set_text(win32::ED_AMBIENT, &fmt_f(e.ambient_strength));
         for id in [win32::ED_FOG_START, win32::ED_FOG_END, win32::CMD_ENV_FOG_COLOR, win32::CMD_ENV_FOG_FROM_SKY] {
             w.set_enabled(id, e.fog != 0);
@@ -5694,6 +5998,18 @@ Download it from the GitHub releases page to install and update."),
             self.on_terrain_edit(id, &text);
             return;
         }
+        if id == win32::ED_VSNAP {
+            if !matches!(node_ref(nb, s), NodeRef::Env) {
+                return;
+            }
+            let Ok(v) = text.trim().parse::<f32>() else { return };
+            if self.edit_key != Some((s, id)) {
+                self.push_undo();
+                self.edit_key = Some((s, id));
+            }
+            self.edits.env.vertex_snap = (v.max(0.0) as u32).min(2048);
+            return;
+        }
         if (win32::ED_FOG_START..=win32::ED_AMBIENT).contains(&id) {
             if !matches!(node_ref(nb, s), NodeRef::Env) {
                 return;
@@ -5865,9 +6181,20 @@ Download it from the GitHub releases page to install and update."),
             self.explorer_refresh();
             self.details_dirty = true;
         }
+        if self.dirty_t.elapsed() > Duration::from_millis(500) {
+            self.dirty_t = Instant::now();
+            self.update_dirty();
+        }
+        if std::mem::take(&mut self.script_quit) {
+            if self.game_mode {
+                self.window.request_quit();
+            } else if self.play.is_some() {
+                self.stop_play();
+            }
+        }
         self.gui_mouse = (input.mouse.0 as f32, input.mouse.1 as f32);
         if playing {
-            let want = self.want_cursor_free();
+            let want = self.want_cursor_free() || self.paused;
             if want != self.cursor_free {
                 self.cursor_free = want;
                 if want && self.look_active {
@@ -6174,7 +6501,7 @@ Download it from the GitHub releases page to install and update."),
                 MODE_NAMES[self.view.mode as usize],
                 if self.view.affine { "affine" } else { "perspective" },
                 if self.edits.env.fog == 0 { FOG_NAMES[0].to_string() } else { format!("{}, dither {}px", FOG_NAMES[self.edits.env.fog as usize], (self.edits.env.dither * win32::dpi_scale()).round() as i32) },
-                GIZMO_NAMES[self.gizmo.index() as usize],
+                format!("{}{}", GIZMO_NAMES[self.gizmo.index() as usize], if self.snap_on { " + snap" } else { "" }),
                 self.speed_mul,
                 objects, root.tris, root.quads, self.fps,
             ));
@@ -6329,6 +6656,8 @@ Download it from the GitHub releases page to install and update."),
             // back faces are dropped by the shader (the view's setting, or a material that hides them)
             (g.glDisable)(gl::CULL_FACE);
             (g.glUniform1i)(self.locs.cull_on, v.cull as i32);
+            let sn = self.edits.env.vertex_snap as f32;
+            (g.glUniform2f)(self.locs.vsnap, sn, sn * h as f32 / w.max(1) as f32);
             if !wire_only {
                 (g.glUniform1i)(self.locs.mode, fill_mode);
                 if overlay {
@@ -6509,7 +6838,7 @@ Download it from the GitHub releases page to install and update."),
             if let Some(path) = self.shot.take() {
                 let mut px = vec![0u8; (w * h * 4) as usize];
                 (g.glReadPixels)(vx, vy, w, h, gl::RGBA, gl::UNSIGNED_BYTE, px.as_mut_ptr() as *mut c_void);
-                match atlas::write_bmp(&path, w as usize, h as usize, &px) {
+                match shot_write(&path, w, h, &px) {
                     Ok(()) => println!("screenshot saved to {path}"),
                     Err(e) => self.window.message(&format!("Could not save the screenshot:\n\n{e}")),
                 }
@@ -6651,6 +6980,7 @@ fn run_game(game: pak::Pak) {
     let stopped = Arc::new(AtomicBool::new(true)); // there is no model file to watch
     let mut app = App::new(window, Loaded { mesh, atlas: Some(atlas) }, "game".into(), None, Some(dir.join("game.polystation")), Some(st), tx, stopped, tex_tx);
     app.game_mode = true;
+    app.game_title = title.clone();
     app.settings.fps_limit = b.fps_limit; // a game has its own frame rate settings, not the editor's
     app.settings.vsync = b.vsync;
     app.start_play();
@@ -6665,7 +6995,10 @@ fn event_loop(app: &mut App, rx: &mpsc::Receiver<Msg>, tex_rx: &mpsc::Receiver<T
     loop {
         let input = app.window.poll();
         if input.quit {
-            break;
+            if app.confirm_discard() {
+                break;
+            }
+            app.window.cancel_quit(); // the user chose Cancel
         }
         let mut quit = false;
         for id in app.window.take_commands() {

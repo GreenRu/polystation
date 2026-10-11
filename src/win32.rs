@@ -131,6 +131,7 @@ unsafe extern "system" {
     fn DispatchMessageW(msg: *const MSG) -> isize;
     fn PostQuitMessage(code: i32);
     fn LoadCursorW(inst: isize, name: usize) -> isize;
+    fn LoadIconW(inst: isize, name: usize) -> isize;
     fn GetDC(h: HWND) -> HDC;
     fn GetClientRect(h: HWND, r: *mut RECT) -> i32;
     fn SetCapture(h: HWND) -> HWND;
@@ -243,6 +244,8 @@ thread_local! {
     static GAME_HIDDEN: Cell<bool> = const { Cell::new(false) };
     /// A script asked for the pointer to stay inside the game view.
     static CLIP_ON: Cell<bool> = const { Cell::new(false) };
+    /// A compiled game is paused (Esc): Q quits.
+    static PAUSED: Cell<bool> = const { Cell::new(false) };
     static TRACKING: Cell<bool> = const { Cell::new(false) };
     static HIGH_SURROGATE: Cell<u16> = const { Cell::new(0) };
     static LAST_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
@@ -322,6 +325,15 @@ pub const ED_MATOFF1: u16 = 3168;
 pub const ED_MATSCR0: u16 = 3169;
 pub const ED_MATSCR1: u16 = 3170;
 pub const ST_CAMINFO: u16 = 3171;
+pub const ED_VSNAP: u16 = 3172;
+pub const CMD_SNAP: u16 = 1260;
+pub const CMD_DROP: u16 = 1261;
+pub const CMD_SHORTCUTS: u16 = 1262;
+pub const CMD_PAUSE: u16 = 1263;
+/// Standard views: front, back, right, left, top, bottom.
+pub const CMD_VIEW_BASE: u16 = 1270;
+/// Environment presets: Classic PS1, Night, Day, Clean.
+pub const CMD_PRESET_BASE: u16 = 1280;
 pub const ST_MATINFO: u16 = 3137;
 pub const CMD_SCREENSHOT: u16 = 1006;
 pub const CMD_RESET_CAMERA: u16 = 1010;
@@ -488,6 +500,7 @@ pub(crate) fn drag_spec(id: u16) -> Option<(f32, f32, f32, bool, bool)> {
         ED_STEPS => (0.05, 2.0, 32.0, true, false),
         ED_RENDER_DIST => (0.1, 0.0, 1.0e7, false, true),
         ED_AMBIENT => (0.01, 0.0, 8.0, false, false),
+        ED_VSNAP => (1.0, 0.0, 2048.0, true, false),
         ED_MATALPHA | ED_MATGLOW | ED_MATCUT => (0.004, 0.0, 1.0, false, false),
         ED_MATBRIGHT => (0.01, 0.0, 8.0, false, false),
         ED_MATROT => (0.5, -3600.0, 3600.0, false, false),
@@ -709,7 +722,7 @@ impl Window {
                 cbClsExtra: 0,
                 cbWndExtra: 0,
                 hInstance: inst,
-                hIcon: 0,
+                hIcon: LoadIconW(inst, 1), // the logo, linked in by build.rs
                 hCursor: LoadCursorW(0, 32512),
                 hbrBackground: 0,
                 lpszMenuName: std::ptr::null(),
@@ -767,6 +780,9 @@ impl Window {
                 (CMD_SELECT_ALL, "Select A&ll\tCtrl+A"),
                 (CMD_SELECT_NONE, "Select &None\tEsc"),
                 (0, ""),
+                (CMD_DROP, "Drop to &Ground\tEnd"),
+                (CMD_SNAP, "S&nap to Grid\tG"),
+                (0, ""),
                 (CMD_GIZMO_BASE, "Gizmo: N&one\tQ"),
                 (CMD_GIZMO_BASE + 1, "Gizmo: &Move\tR"),
                 (CMD_GIZMO_BASE + 2, "Gizmo: &Rotate\tT"),
@@ -793,6 +809,13 @@ impl Window {
                 (CMD_DITHER_FINER, "Dither Fi&ner\t,"),
                 (CMD_DITHER_CHUNKIER, "Dither Chun&kier\t."),
                 (0, ""),
+                (CMD_VIEW_BASE, "Front View\tNum 1"),
+                (CMD_VIEW_BASE + 1, "Back View\tCtrl+Num 1"),
+                (CMD_VIEW_BASE + 2, "Right View\tNum 3"),
+                (CMD_VIEW_BASE + 3, "Left View\tCtrl+Num 3"),
+                (CMD_VIEW_BASE + 4, "Top View\tNum 7"),
+                (CMD_VIEW_BASE + 5, "Bottom View\tCtrl+Num 7"),
+                (0, ""),
                 (CMD_FRAME_SEL, "Frame &Selected\tF"),
                 (CMD_FRAME_ALL, "Frame A&ll\tShift+F"),
                 (CMD_SELECT_ENV, "&Environment Settings..."),
@@ -800,7 +823,7 @@ impl Window {
                 (CMD_RESET_CAMERA, "&Reset Camera"),
             ]);
             let run = popup(&[(CMD_PLAY, "&Play\tF5")]);
-            let mut help = vec![MenuItem::new(CMD_HELP_GUIDE, "Scripting Guide"), MenuItem::new(CMD_UPDATE, "Check for Updates..."), MenuItem::new(CMD_UNINSTALL, "Uninstall Polystation..."), MenuItem::sep()];
+            let mut help = vec![MenuItem::new(CMD_HELP_GUIDE, "Scripting Guide"), MenuItem::new(CMD_SHORTCUTS, "Keyboard Shortcuts\tF1"), MenuItem::new(CMD_UPDATE, "Check for Updates..."), MenuItem::new(CMD_UNINSTALL, "Uninstall Polystation..."), MenuItem::sep()];
             help.push(MenuItem::submenu(
                 "Example Scripts",
                 crate::guide::EXAMPLES.iter().enumerate().map(|(i, (title, _))| MenuItem::new(CMD_EXAMPLE_BASE + i as u16, title)).collect(),
@@ -1160,7 +1183,14 @@ impl Window {
             ctl("EDIT", "", EDIT, ED_AMBIENT, 216, 252, 68, 22);
             ctl("STATIC", "Color depth", 0, 0, 8, 292, 78, 18);
             ctl("COMBOBOX", "", COMBO, CB_COLORBITS, 88, 288, 206, 150);
-            ctl("STATIC", "", 0, ST_ENV_INFO, 8, 328, 288, 130);
+            ctl("STATIC", "Vertex snap", 0, 0, 8, 328, 86, 18);
+            ctl("EDIT", "", EDIT, ED_VSNAP, 98, 324, 68, 22);
+            ctl("STATIC", "px wide, 0 = off", 0, 0, 172, 328, 124, 18);
+            ctl("STATIC", "Presets", 0, 0, 8, 364, 62, 18);
+            for (i, name) in ["Classic", "Night", "Day", "Clean"].into_iter().enumerate() {
+                ctl("BUTTON", name, BTN, CMD_PRESET_BASE + i as u16, 8 + i as i32 * 73, 386, 68, 24);
+            }
+            ctl("STATIC", "", 0, ST_ENV_INFO, 8, 426, 288, 130);
 
             let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
             GetClientRect(main, &mut r);
@@ -1380,8 +1410,12 @@ impl Window {
 
     fn handle_key(&self, ui: &mut Ui, vk: u32, sys: bool) {
         if PLAYING.get() {
-            // play mode: Esc and F5 stop; every other key belongs to the game
-            if vk == 0x1B || vk == 0x74 {
+            // play mode: Esc and F5 stop (in a compiled game Esc pauses and Q then quits); every other key belongs to the game
+            if vk == 0x1B && ui.game {
+                ui.commands.push(CMD_PAUSE);
+            } else if vk == 0x51 && ui.game && PAUSED.get() {
+                ui.commands.push(CMD_EXIT);
+            } else if vk == 0x1B || vk == 0x74 {
                 ui.commands.push(CMD_PLAY);
             } else if vk == 0x7A && ui.game {
                 self.set_fullscreen(!self.is_fullscreen()); // F11 in a compiled game
@@ -1419,7 +1453,13 @@ impl Window {
             (0x5A, true, true, _) | (0x59, true, _, _) => Some(CMD_REDO),
             (0x44, true, _, _) => Some(CMD_DUPLICATE),
             (0x41, true, _, _) => Some(CMD_SELECT_ALL),
+            (0x70, _, _, _) => Some(CMD_SHORTCUTS),
             _ if text => None,
+            (0x47, false, false, false) => Some(CMD_SNAP),
+            (0x23, false, _, _) => Some(CMD_DROP),
+            (0x61, _, _, _) => Some(CMD_VIEW_BASE + ctrl as u16),
+            (0x63, _, _, _) => Some(CMD_VIEW_BASE + 2 + ctrl as u16),
+            (0x67, _, _, _) => Some(CMD_VIEW_BASE + 4 + ctrl as u16),
             (0x2E, false, _, _) => Some(CMD_DELETE),
             (0x46, false, false, false) => Some(CMD_FRAME_SEL),
             (0x46, false, true, false) => Some(CMD_FRAME_ALL),
@@ -1456,6 +1496,27 @@ impl Window {
         let mut d = MessageDialog::new(title, text, &[yes, no]);
         self.run_dialog(&mut d);
         d.result == Some(0)
+    }
+
+    /// Asks with three buttons; the index of the one chosen (None when the window was closed).
+    pub fn ask3(&self, title: &str, text: &str, buttons: [&str; 3]) -> Option<usize> {
+        let mut d = MessageDialog::new(title, text, &buttons);
+        self.run_dialog(&mut d);
+        d.result
+    }
+
+    /// A compiled game is paused.
+    pub fn set_paused(&self, on: bool) {
+        PAUSED.set(on);
+    }
+
+    /// Closes the window (a script's quit()), or takes back a close request that was refused.
+    pub fn request_quit(&self) {
+        update(|i| i.quit = true);
+    }
+
+    pub fn cancel_quit(&self) {
+        update(|i| i.quit = false);
     }
 
     pub fn set_title(&self, title: &str) {

@@ -242,7 +242,10 @@ impl Dialog for Hub {
         c.r.fill(r[0], r[1], sw, r[3], c_bar());
         c.r.fill(r[0] + sw - 1.0, r[1], 1.0, r[3], c_border_soft());
         let k = (3.0 * s).round().max(2.0);
-        let ty = r[1] + 34.0 * s;
+        let lk = (1.5 * s).round().max(1.0); // the logo: whole pixels per logo pixel
+        let logo = super::logo::SIZE as f32 * lk;
+        super::logo::draw(c, r[0] + 28.0 * s, r[1] + 26.0 * s, lk);
+        let ty = r[1] + 26.0 * s + logo + 16.0 * s;
         pixel(c, "POLY", r[0] + 28.0 * s, ty, k, [0.95, 0.95, 1.0, 1.0]);
         pixel(c, "STATION", r[0] + 28.0 * s, ty + c.f.pixel.line_h * k + 2.0 * s, k, [0.4, 0.62, 1.0, 1.0]);
         c.text_in(&c.f.ui, "a PS1-style 3D engine", r[0] + 28.0 * s, ty + c.f.pixel.line_h * k * 2.0 + 10.0 * s, 20.0 * s, c_dim());

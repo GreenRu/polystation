@@ -125,6 +125,15 @@ pub trait Host {
     }
     /// Frees the mouse cursor (true: the mouse clicks GUI buttons) or locks it for looking around again.
     fn set_cursor(&mut self, _free: Option<bool>) {}
+    /// Ends the game (stops Play in the editor).
+    fn quit_game(&mut self) {}
+    /// Keeps a value between runs of the game.
+    fn save_value(&mut self, _key: &str, _v: &Value) -> Result<(), String> {
+        Err("this host cannot save values".into())
+    }
+    fn load_value(&self, _key: &str) -> Option<Value> {
+        None
+    }
     /// Keeps the pointer inside the game view (true) or lets it leave (false).
     fn mouse_lock(&mut self, _on: bool) {}
     /// Moves the pointer to the middle of the game view.
@@ -1236,6 +1245,23 @@ impl Run<'_> {
                     }
                 }
                 Value::Nil
+            }
+            "quit" => {
+                self.host.quit_game();
+                Value::Nil
+            }
+            "save_value" => {
+                need(2, self)?;
+                let Value::Str(key) = &args[0] else { return self.fail("`save_value` needs a name in quotes, like save_value(\"coins\", 5)") };
+                if let Err(e) = self.host.save_value(key, &args[1]) {
+                    return self.fail(e);
+                }
+                Value::Nil
+            }
+            "load_value" => {
+                need(2, self)?;
+                let Value::Str(key) = &args[0] else { return self.fail("`load_value` needs a name in quotes, like load_value(\"coins\", 0)") };
+                self.host.load_value(key).unwrap_or_else(|| args[1].clone())
             }
             "mouse_lock" => {
                 need(1, self)?;

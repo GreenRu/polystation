@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Polystation</title>
+<link rel="icon" href="favicon.ico" sizes="any">
+<link rel="icon" type="image/png" href="favicon-32.png" sizes="32x32">
+<link rel="apple-touch-icon" href="logo-188.png">
 <meta name="description" content="Polystation is a free PlayStation-1 style 3D engine and editor for Windows, written from scratch in Rust with no dependencies.">
 <style>
   :root {
@@ -30,7 +33,11 @@
   .wrap { max-width: 1040px; margin: 0 auto; padding: 0 16px; }
   nav { border-bottom: 2px solid var(--line); background: var(--panel); }
   nav .wrap { display: flex; align-items: center; gap: 20px; height: 56px; flex-wrap: wrap; }
-  nav b { letter-spacing: 2px; text-transform: uppercase; margin-right: auto; }
+  nav b { letter-spacing: 2px; text-transform: uppercase; margin-right: auto; display: flex; align-items: center; gap: 10px; }
+  nav b img, .hero-logo { image-rendering: pixelated; }
+  .hero .wrap { display: flex; align-items: center; gap: 36px; flex-wrap: wrap; }
+  .hero-logo { width: 188px; height: 188px; flex: none; }
+  .hero-text { flex: 1 1 420px; }
   nav a { color: var(--dim); text-decoration: none; }
   nav a:hover { color: var(--text); }
   .hero { padding: 72px 0 48px; border-bottom: 2px solid var(--line); }
@@ -64,7 +71,7 @@
 <body>
 <nav>
   <div class="wrap">
-    <b>Polystation</b>
+    <b><img src="logo.png" width="28" height="28" alt="">Polystation</b>
     <a href="#features">Features</a>
     <a href="#screens">Screenshots</a>
     <a href="#install">Install</a>
@@ -75,12 +82,15 @@
 
 <header class="hero">
   <div class="wrap">
+    <img class="hero-logo" src="logo-188.png" width="188" height="188" alt="The Polystation logo">
+    <div class="hero-text">
     <h1>Polystation</h1>
     <p>A free, PlayStation&#8209;1 style 3D engine and editor for Windows. Written from scratch in Rust with no dependencies: its own OpenGL renderer, its own interface, its own scripting language. Build a game, press Compile, get one <code>.exe</code>.</p>
     <a class="btn" href="https://github.com/GreenRu/polystation/releases/latest/download/polystation-setup.exe">Download for Windows</a>
     <a class="btn alt" href="https://github.com/GreenRu/polystation/releases/latest/download/polystation.exe">polystation.exe only</a>
     <a class="btn alt" href="https://github.com/GreenRu/polystation">Source code</a>
     <div class="note">Windows 10 / 11, 64&#8209;bit. Installs for the current user, no admin rights. MIT license.</div>
+    </div>
   </div>
 </header>
 

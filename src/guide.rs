@@ -107,6 +107,9 @@ BUILT-IN FUNCTIONS
                                     "none" hides it, "auto" is back to normal
     mouse_x()  mouse_y()  mouse_down()   pointer position (pixels of the game view) and left button
                                     (while the pointer is free, see cursor(true) / gui_mode)
+    quit()                          ends the game (stops Play in the editor)
+    save_value("coins", 5)          keep a number, text or true / false between runs of the game
+    load_value("coins", 0)          read it back (the second value is used when nothing was saved)
     random()            0 to 1                      random(a, b)    between a and b
     sin cos tan atan2 abs sqrt floor ceil round sign pow min max
     clamp(v, lo, hi)    lerp(a, b, t)               (t = 0 gives a, 1 gives b)

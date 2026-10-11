@@ -291,6 +291,8 @@ pub struct Environment {
     pub ambient_strength: f32,
     /// Colour depth of the picture: 4, 8, 16 or 32 bits (see the shaders).
     pub color_bits: u8,
+    /// Vertices snap to a grid this many pixels wide (the PS1 wobble); 0 = off.
+    pub vertex_snap: u32,
 }
 
 pub const BACKGROUND: [f32; 3] = [0.08, 0.09, 0.125];
@@ -308,6 +310,7 @@ impl Default for Environment {
             ambient: [0.35, 0.35, 0.35],
             ambient_strength: 1.0,
             color_bits: 32,
+            vertex_snap: 0,
             sky: Sky { kind: SkyKind::Solid, solid: BACKGROUND, top: [0.12, 0.2, 0.42], bottom: [0.55, 0.62, 0.75], texture: None },
         }
     }

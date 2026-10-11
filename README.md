@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo-188.png" width="94" alt="Polystation logo"></p>
+
 # Polystation
 
 A small PlayStation-1 style 3D engine and editor for Windows, written from scratch in Rust with **no

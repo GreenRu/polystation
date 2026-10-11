@@ -14,6 +14,7 @@ pub mod edit;
 pub mod font;
 mod input;
 pub mod list;
+pub mod logo;
 pub mod popup;
 pub mod render;
 pub mod script_view;
