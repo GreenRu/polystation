@@ -1,0 +1,10 @@
+# one big textured quad (brick tile) - affine mapping swims visibly on large quads
+vt 0.505 0.005
+vt 0.995 0.005
+vt 0.995 0.495
+vt 0.505 0.495
+v -6 0  6
+v  6 0  6
+v  6 0 -6
+v -6 0 -6
+f 1/1 2/2 3/3 4/4
