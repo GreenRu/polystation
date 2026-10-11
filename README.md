@@ -27,3 +27,7 @@ cargo build --release
 
 produces `target/release/polystation.exe` (the engine) and `target/release/polystation-setup.exe` (the installer).
 Windows only; needs a Rust toolchain.
+
+## License
+
+[MIT](LICENSE): free to use, modify and distribute, as long as the original copyright and license notice are kept with the code.
