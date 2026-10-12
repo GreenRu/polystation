@@ -1,6 +1,10 @@
+// A Windows program, not a console one: opening the editor (or a compiled game) does not open a terminal.
+#![windows_subsystem = "windows"]
+
 mod atlas;
 mod blend;
 mod build;
+mod console;
 mod gl;
 mod graph;
 mod gui;
@@ -52,8 +56,41 @@ use std::time::{Duration, Instant, SystemTime};
 // per object: 4 texels model matrix, 1 texel colour override (a > 0.5 = use it), 1 texel state
 // (x: 0 normal, 1 hidden/deleted, 2 selected).
 // ------------------------------------------------------------------------------------------
-const VS: &str = "#version 330 core
-layout(location = 0) in vec3 pos;
+/// The scene's lights and the function that works out the light a surface receives. Used by the vertex shader (lit at the
+/// corners of each face) and, for flat shading, by the fragment shader (lit once per face).
+const LIGHT_GLSL: &str = "uniform vec3 light;          // the single sun used while the scene has no lights
+uniform int nLights;
+uniform vec4 lPos[16];       // xyz position, w: 0 point, 1 spot, 2 sun
+uniform vec4 lCol[16];       // rgb color * intensity, w: range
+uniform vec4 lDir[16];       // xyz direction the light shines in, w: cos of the spot half angle
+uniform vec3 ambient;
+vec3 shade(vec3 wp, vec3 n) {
+    vec3 lit;
+    if (nLights == 0) {
+        lit = ambient + vec3(0.65 * max(dot(n, light), 0.0));
+    } else {
+        lit = ambient;
+        for (int i = 0; i < nLights; i++) {
+            vec3 L;
+            float att = 1.0;
+            if (lPos[i].w > 1.5) {
+                L = -lDir[i].xyz;
+            } else {
+                vec3 d = lPos[i].xyz - wp;
+                float dist = length(d);
+                L = d / max(dist, 1e-4);
+                float x = clamp(1.0 - dist / max(lCol[i].w, 1e-3), 0.0, 1.0);
+                att = x * x;
+                if (lPos[i].w > 0.5) att *= smoothstep(lDir[i].w, mix(lDir[i].w, 1.0, 0.35), dot(-L, lDir[i].xyz));
+            }
+            lit += lCol[i].rgb * max(dot(n, L), 0.0) * att;
+        }
+    }
+    return lit;
+}
+";
+
+const VS: &str = "layout(location = 0) in vec3 pos;
 layout(location = 1) in vec2 uv;
 layout(location = 2) in vec3 nrm;
 layout(location = 3) in vec4 rect;
@@ -62,14 +99,10 @@ uniform mat4 mvp;
 uniform vec3 cam;
 uniform float time;
 uniform sampler2D objs;
-uniform vec3 light;          // the single sun used while the scene has no lights
-uniform int nLights;
-uniform vec4 lPos[16];       // xyz position, w: 0 point, 1 spot, 2 sun
-uniform vec4 lCol[16];       // rgb color * intensity, w: range
-uniform vec4 lDir[16];       // xyz direction the light shines in, w: cos of the spot half angle
-uniform vec3 ambient;
 uniform vec2 vsnap;          // vertex snapping grid in pixels (0 = off)
 smooth out vec3 v_lit;
+smooth out vec3 v_wp;
+flat out float v_glow;
 smooth out vec2 v_uv_p;
 noperspective out vec2 v_uv_a;
 flat out vec3 v_n;
@@ -119,30 +152,11 @@ void main() {
     v_state = st;
     v_oid = oid;
     v_dist = length(wp.xyz - cam);
-    // lighting per vertex (the result is blended across the triangle)
-    vec3 n = normalize(mat3(m) * nrm);
-    vec3 lit;
-    if (nLights == 0) {
-        lit = ambient + vec3(0.65 * max(dot(n, light), 0.0));
-    } else {
-        lit = ambient;
-        for (int i = 0; i < nLights; i++) {
-            vec3 L;
-            float att = 1.0;
-            if (lPos[i].w > 1.5) {
-                L = -lDir[i].xyz;
-            } else {
-                vec3 d = lPos[i].xyz - wp.xyz;
-                float dist = length(d);
-                L = d / max(dist, 1e-4);
-                float x = clamp(1.0 - dist / max(lCol[i].w, 1e-3), 0.0, 1.0);
-                att = x * x;
-                if (lPos[i].w > 0.5) att *= smoothstep(lDir[i].w, mix(lDir[i].w, 1.0, 0.35), dot(-L, lDir[i].xyz));
-            }
-            lit += lCol[i].rgb * max(dot(n, L), 0.0) * att;
-        }
-    }
-    v_lit = (flags.w > 0.5) ? vec3(1.0) : mix(lit, vec3(1.0), clamp(texelFetch(objs, b + ivec2(10, 0), 0).w, 0.0, 1.0)); // light markers and glowing materials shine by themselves
+    // lighting per vertex (the result is blended across the triangle); flat shading redoes it per face in the fragment shader
+    float glow = (flags.w > 0.5) ? 1.0 : clamp(texelFetch(objs, b + ivec2(10, 0), 0).w, 0.0, 1.0); // light markers and glowing materials shine by themselves
+    v_wp = wp.xyz;
+    v_glow = glow;
+    v_lit = mix(shade(wp.xyz, normalize(mat3(m) * nrm)), vec3(1.0), glow);
 }
 ";
 
@@ -157,8 +171,12 @@ uniform int drawPass;
 uniform int mode;
 uniform int affine;
 uniform int cullOn;
+uniform int flatShade;
+uniform vec3 cam;
 uniform float time;
 smooth in vec3 v_lit;
+smooth in vec3 v_wp;
+flat in float v_glow;
 smooth in vec2 v_uv_p;
 noperspective in vec2 v_uv_a;
 flat in vec3 v_n;
@@ -241,6 +259,15 @@ void main() {
     vec3 n = normalize(v_n);
     if (!gl_FrontFacing) n = -n;
     vec3 k = v_lit;
+    if (flatShade != 0) {
+        // flat shading: one light value for the whole face, from the direction the face really points in
+        vec3 fnorm = cross(dFdx(v_wp), dFdy(v_wp));
+        if (dot(fnorm, fnorm) > 1e-14) {
+            fnorm = normalize(fnorm);
+            if (dot(fnorm, cam - v_wp) < 0.0) fnorm = -fnorm;
+            k = mix(shade(v_wp, fnorm), vec3(1.0), v_glow);
+        }
+    }
     vec3 rgb;
     if (mode == 1) {
         rgb = vec3(0.78) * k;
@@ -508,6 +535,7 @@ use scene::BACKGROUND;
 
 fn die(msg: &str) -> ! {
     eprintln!("{msg}");
+    win32::fatal(msg); // there is no terminal to read it in
     std::process::exit(1);
 }
 
@@ -552,6 +580,14 @@ fn load_scene(path: &str, atlas_arg: Option<&str>) -> Result<Loaded, String> {
 /// What "Add Script" starts a new script with.
 const SCRIPT_TEMPLATE: &str = "// Runs once when you press Play.\non start {\n    print(\"hello from \" + self.name)\n}\n\n// Runs every frame while playing. dt = seconds since the last frame.\non update {\n    // rotation.y += 90 * dt\n}\n\n// Runs when a key goes down:\n// on key(\"e\") { visible = !visible }\n\n// Properties: position.x/y/z  rotation.x/y/z  scale.x/y/z  color.r/g/b  alpha  visible\n// Objects:    self  player  object(\"Name\")\n// Functions:  move(x,y,z) spin(x,y,z)  key(\"w\")  pressed(\"e\")  distance(a, b)  random(a, b)  set/get/add  hud  destroy  launch  sound\n// More: Help > Scripting Guide (GUIDE tab) and Help > Example Scripts.\n";
 
+/// Do two paths name the same file?
+fn same_file(a: &str, b: &str) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a.eq_ignore_ascii_case(b),
+    }
+}
+
 fn stamp(path: &str) -> Option<(SystemTime, u64)> {
     let m = std::fs::metadata(path).ok()?;
     Some((m.modified().ok()?, m.len()))
@@ -589,31 +625,36 @@ fn spawn_load(tx: mpsc::Sender<Msg>, path: String, atlas_arg: Option<String>, im
     });
 }
 
-/// Polls the source file; when it changes (and has stopped changing), reloads it in the background.
-/// Blender saves via temp-file + rename, hence the settle wait. Set the returned flag to stop it.
+/// Polls the model file, every model imported into the scene and the texture atlas; when one of them changes
+/// (and has stopped changing), reloads the scene in the background. Blender saves via temp-file + rename,
+/// hence the settle wait. Set the returned flag to stop it.
 fn spawn_watch(tx: mpsc::Sender<Msg>, path: String, atlas_arg: Option<String>, imports: Vec<String>) -> Arc<AtomicBool> {
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
     std::thread::spawn(move || {
-        let mut seen = stamp(&path);
+        let watched: Vec<String> = std::iter::once(path.clone()).chain(imports.iter().cloned()).chain(atlas_arg.iter().cloned()).collect();
+        let stamps = || -> Vec<Option<(SystemTime, u64)>> { watched.iter().map(|p| stamp(p)).collect() };
+        // a file that is missing for a moment (a save in progress) is not a change
+        let changed = |now: &[Option<(SystemTime, u64)>], seen: &[Option<(SystemTime, u64)>]| now.iter().zip(seen).any(|(n, s)| n.is_some() && n != s);
+        let mut seen = stamps();
         loop {
             std::thread::sleep(Duration::from_millis(300));
             if flag.load(Ordering::Relaxed) {
                 return;
             }
-            let now = stamp(&path);
-            if now.is_none() || now == seen {
+            let now = stamps();
+            if !changed(&now, &seen) {
                 continue;
             }
             std::thread::sleep(Duration::from_millis(400));
             if flag.load(Ordering::Relaxed) {
                 return;
             }
-            if stamp(&path) != now {
+            if stamps() != now {
                 continue; // still being written
             }
             seen = now;
-            println!("{path} changed, reloading ...");
+            println!("a model file changed, reloading ...");
             let result = load_with_imports(&path, atlas_arg.as_deref(), &imports);
             let msg = Msg { path: path.clone(), atlas_arg: atlas_arg.clone(), imports: imports.clone(), intent: Intent::Reload, result };
             if tx.send(msg).is_err() {
@@ -1303,6 +1344,9 @@ struct PlayHost<'a> {
     app: &'a mut App,
     walker: &'a mut play::Walker,
     yaw: &'a mut f32,
+    pitch: &'a mut f32,
+    /// The player's Size.
+    size: f32,
     held: &'a [bool],
     pressed: &'a [bool],
     gravity: f32,
@@ -1353,9 +1397,13 @@ impl script::Host for PlayHost<'_> {
         if obj == "player" {
             return match p {
                 PosX | PosY | PosZ => Ok(self.walker.pos[p as usize - PosX as usize] as f64),
+                // like any object: rotation.x looks up (+) and down (-), rotation.y turns, rotation.z rolls the view
+                RotX => Ok((*self.pitch).to_degrees() as f64),
                 RotY => Ok((-*self.yaw).to_degrees() as f64),
+                RotZ => Ok(self.app.play_roll as f64),
+                ScaleX | ScaleY | ScaleZ => Ok(self.size as f64),
                 Visible | Solid => Ok(1.0),
-                _ => Err("the player only has position and rotation.y".into()),
+                _ => Err("the player has a position, a rotation and a size (read only), but no color or alpha".into()),
             };
         }
         let i = self.node(obj)?;
@@ -1386,8 +1434,11 @@ impl script::Host for PlayHost<'_> {
                     self.walker.pos[p as usize - PosX as usize] = v; // teleport
                     self.walker.vel[1] = 0.0;
                 }
+                RotX => *self.pitch = v.to_radians().clamp(-1.5, 1.5),
                 RotY => *self.yaw = -v.to_radians(),
-                _ => return Err("the player only has position and rotation.y".into()),
+                RotZ => self.app.play_roll = v,
+                ScaleX | ScaleY | ScaleZ => return Err("the player's size is set on the Player object (Size) before playing".into()),
+                _ => return Err("the player has a position and a rotation, but no color or alpha".into()),
             }
             return Ok(());
         }
@@ -1452,7 +1503,9 @@ impl script::Host for PlayHost<'_> {
 
     fn print(&mut self, text: &str) {
         println!("[script] {text}");
-        self.app.status_note(text);
+        self.app.console.log(console::Level::Script, text);
+        self.app.window.set_status(text); // (the console has it already)
+        self.app.status_t = Instant::now() + Duration::from_secs(2);
     }
 
     fn var_get(&self, name: &str) -> Option<script::Value> {
@@ -1746,6 +1799,12 @@ struct App {
     recovered: bool,
     /// Name of the compiled game (where its saved values go).
     game_title: String,
+    /// The model changed on disk while playing: it reloads when Play stops.
+    pending_reload: Option<Msg>,
+    /// The log of the console tab.
+    console: console::Console,
+    /// Camera roll while playing (rotation.z of the player), degrees.
+    play_roll: f32,
     /// Chunk the camera is in, per added object (only chunked terrains care).
     terrain_views: Vec<(i32, i32)>,
     /// Rubber-band selection rectangle (start, current) in canvas pixels.
@@ -1787,6 +1846,7 @@ struct Locs {
     affine: i32,
     cull_on: i32,
     vsnap: i32,
+    flat_shade: i32,
     cam: i32,
     fog: i32,
     fog_range: i32,
@@ -1949,9 +2009,10 @@ impl App {
         let g = unsafe { gl::Gl::load() }.unwrap_or_else(|e| die(&e));
         window.init_ui(g);
         unsafe {
-            let fs = format!("#version 330 core\n{FOG_GLSL}{FS}");
+            let fs = format!("#version 330 core\n{LIGHT_GLSL}{FOG_GLSL}{FS}");
+            let vs = format!("#version 330 core\n{LIGHT_GLSL}{VS}");
             let grid_fs = format!("#version 330 core\n{FOG_GLSL}{GRID_FS}");
-            let prog = g.compile_program(VS, &fs).unwrap_or_else(|e| die(&e));
+            let prog = g.compile_program(&vs, &fs).unwrap_or_else(|e| die(&e));
             let grid_prog = g.compile_program(GRID_VS, &grid_fs).unwrap_or_else(|e| die(&e));
             (g.glPixelStorei)(gl::UNPACK_ALIGNMENT, 1);
 
@@ -2010,7 +2071,7 @@ impl App {
             let locs = Locs {
                 n_lights: loc(b"nLights\0"), l_pos: loc(b"lPos\0"), l_col: loc(b"lCol\0"), l_dir: loc(b"lDir\0"), ambient: loc(b"ambient\0"),
                 time: loc(b"time\0"),
-                mvp: loc(b"mvp\0"), cutoff: loc(b"cutoff\0"), mode: loc(b"mode\0"), affine: loc(b"affine\0"), cull_on: loc(b"cullOn\0"), vsnap: loc(b"vsnap\0"),
+                mvp: loc(b"mvp\0"), cutoff: loc(b"cutoff\0"), mode: loc(b"mode\0"), affine: loc(b"affine\0"), cull_on: loc(b"cullOn\0"), vsnap: loc(b"vsnap\0"), flat_shade: loc(b"flatShade\0"),
                 cam: loc(b"cam\0"), fog: loc(b"fog\0"), fog_range: loc(b"fogRange\0"), draw_pass: loc(b"drawPass\0"), dither: loc(b"ditherCell\0"), fog_color: loc(b"fogColor\0"), fog_steps: loc(b"fogSteps\0"),
             };
             (g.glUniform1i)(loc(b"atlas\0"), 0);
@@ -2043,7 +2104,7 @@ impl App {
             let grid_locs = Locs {
                 n_lights: 0, l_pos: 0, l_col: 0, l_dir: 0, ambient: 0,
                 time: 0,
-                mvp: gloc(b"mvp\0"), cutoff: 0, mode: 0, affine: 0, cull_on: 0, vsnap: 0,
+                mvp: gloc(b"mvp\0"), cutoff: 0, mode: 0, affine: 0, cull_on: 0, vsnap: 0, flat_shade: 0,
                 cam: gloc(b"cam\0"), fog: gloc(b"fog\0"), fog_range: gloc(b"fogRange\0"), draw_pass: 0, dither: gloc(b"ditherCell\0"), fog_color: gloc(b"fogColor\0"), fog_steps: gloc(b"fogSteps\0"),
             };
 
@@ -2106,7 +2167,7 @@ impl App {
                 model_path, atlas_arg, project_path, watcher, tx, imports, base_atlas,
                 objects_dirty: true, details_dirty: true, look_active: false, rmb: None, play: None, script_hidden: HashSet::new(), script_vars: HashMap::new(), hud: String::new(), underwater: false, play_hidden: HashSet::new(), press: None, orbit: None, last_mouse: None,
                 poll_t: Instant::now(), status_t: Instant::now() - Duration::from_secs(1), fps: 60.0, shot: None, shot_waiters: Vec::new(), game_mode: false, script_undo: None, cam_fbo, cam_tex, uv_boxes: Vec::new(), camera_tiles: Vec::new(), compass_drag: None, surf: None, play_camera: None, cursor_free: false, cursor_override: None, tab_free: false, tab_prev: false, gui_clicks: Vec::new(), gui_mouse: (0.0, 0.0), gui_down: false, build: startup.as_ref().map(|s| s.build.clone()).unwrap_or_default(), settings: settings::Settings::load(),
-                gizmo: Gizmo::Move, drag: None, hover: None, box_sel: None, explorer_dir: PathBuf::new(), explorer_items: Vec::new(), sel_mat: None, mat_lib_key: Vec::new(), saved_edits: None, dirty: false, dirty_t: Instant::now(), autosave_t: Instant::now(), snap_on: false, paused: false, script_quit: false, recovered: false, game_title: String::new(), terrain_views: Vec::new(), last_mvp: math::identity(), gizmo_vao, gizmo_vbo,
+                gizmo: Gizmo::Move, drag: None, hover: None, box_sel: None, explorer_dir: PathBuf::new(), explorer_items: Vec::new(), sel_mat: None, mat_lib_key: Vec::new(), saved_edits: None, dirty: false, dirty_t: Instant::now(), autosave_t: Instant::now(), snap_on: false, paused: false, script_quit: false, recovered: false, game_title: String::new(), pending_reload: None, console: { let mut c = console::Console::new(); c.log(console::Level::Info, "Console ready: type help for the commands"); c }, play_roll: 0.0, terrain_views: Vec::new(), last_mvp: math::identity(), gizmo_vao, gizmo_vbo,
                 grid_inf_prog, grid_inf, sky_prog, sky_vao, sky_locs, sky_tex, sky_loaded: None,
                 particle_prog, particle_locs, t0: Instant::now(),
                 user_tex, utex_rects: HashMap::new(), utex_key: Vec::new(), utex_cache: HashMap::new(), tex_tx,
@@ -2327,6 +2388,12 @@ impl App {
         if matches!(msg.intent, Intent::Reload) && (msg.path != self.model_path || msg.imports != self.imports) {
             return; // stale: that model is no longer open
         }
+        if matches!(msg.intent, Intent::Reload) && msg.result.is_ok() && self.play.is_some() {
+            // the scene would change under the running game: wait for Stop
+            self.pending_reload = Some(msg);
+            self.status_note("The model changed: it reloads when you stop playing");
+            return;
+        }
         let new = match msg.result {
             Ok(n) => n,
             Err(e) => {
@@ -2357,7 +2424,10 @@ impl App {
         }
         match msg.intent {
             Intent::Import => {}
-            Intent::Reload => self.install(None, Some(keep)),
+            Intent::Reload => {
+                self.install(None, Some(keep));
+                self.status_note("Reloaded: the model changed on disk");
+            }
             Intent::Replace { state, project } => {
                 self.watcher.store(true, Ordering::Relaxed);
                 self.watcher = spawn_watch(self.tx.clone(), msg.path.clone(), msg.atlas_arg.clone(), msg.imports.clone());
@@ -2639,6 +2709,13 @@ impl App {
     }
 
     fn import_model_path(&mut self, file: String) {
+        // importing a model that is already in the scene reloads it (with its changes) instead of adding a copy
+        if self.imports.iter().any(|p| same_file(p, &file)) || same_file(&self.model_path, &file) {
+            self.window.set_title("Loading... - Polystation");
+            self.status_note("That model is already in the scene: reloading it");
+            spawn_load(self.tx.clone(), self.model_path.clone(), self.atlas_arg.clone(), self.imports.clone(), Intent::Reload);
+            return;
+        }
         self.window.set_title("Loading... - Polystation");
         // the model is merged into the open scene (see `apply`), not opened as a new project
         spawn_load(self.tx.clone(), file, None, Vec::new(), Intent::Import);
@@ -3943,7 +4020,7 @@ impl App {
         }
         let pressed: Vec<bool> = (0..256).map(|v| now[v] && !ps.keys_prev[v]).collect();
         let mut scripts = std::mem::take(&mut ps.scripts);
-        let mut host = PlayHost { app: self, walker: &mut ps.walker, yaw: &mut ps.yaw, held: &now, pressed: &pressed, gravity: ps.params.gravity, time: ps.t0.elapsed().as_secs_f64(), changed: false, world_dirty: false };
+        let mut host = PlayHost { app: self, walker: &mut ps.walker, yaw: &mut ps.yaw, pitch: &mut ps.pitch, size: ps.params.scale, held: &now, pressed: &pressed, gravity: ps.params.gravity, time: ps.t0.elapsed().as_secs_f64(), changed: false, world_dirty: false };
         let mut failed = Vec::new();
         for (i, (name, s)) in scripts.iter_mut().enumerate() {
             let r = match &mode {
@@ -4209,7 +4286,7 @@ impl App {
         let ps = PlayState {
             walker: play::Walker::new(x.pos),
             yaw: -x.rot[1].to_radians(),
-            pitch: 0.0,
+            pitch: x.rot[0].to_radians().clamp(-1.5, 1.5), // the player's rotation: x looks up / down, y turns, z rolls
             spawn: x.pos,
             world: self.collision_world(node),
             world_key: (self.mesh.data.len(), self.mesh.indices.len(), self.mesh.data.as_ptr() as usize),
@@ -4230,6 +4307,7 @@ impl App {
             water: self.collision_boxes(scene::Collision::Water),
         };
         let mut ps = ps;
+        self.play_roll = x.rot[2];
         self.gizmo = Gizmo::Off;
         if self.ex.handles[node] != 0 {
             self.window.tree_set_checked(self.ex.handles[node], false); // the player's stand-in is not drawn while playing
@@ -4265,6 +4343,7 @@ impl App {
         let Some(ps) = self.play.take() else { return };
         self.window.stop_sound();
         self.window.reset_game_mouse();
+        self.play_roll = 0.0;
         self.paused = false;
         self.window.set_paused(false);
         self.window.set_playing(false);
@@ -4296,6 +4375,9 @@ impl App {
         self.objects_dirty = true;
         self.poll_t = Instant::now() - Duration::from_secs(1);
         self.window.set_text(win32::CMD_PLAY, "Play");
+        if let Some(m) = self.pending_reload.take() {
+            self.apply(m); // a model changed while the game ran
+        }
     }
 
     /// One frame of play mode: mouse look, walking, footsteps, and the camera follows the player's eyes.
@@ -4455,6 +4537,36 @@ impl App {
                 c.text_in(font, &self.hud, vp[0] + 17.0 * s, vp[1] + 11.0 * s, 24.0 * s, [0.0, 0.0, 0.0, 0.7]);
                 c.text_in(font, &self.hud, vp[0] + 16.0 * s, vp[1] + 10.0 * s, 24.0 * s, [1.0, 1.0, 1.0, 1.0]);
             }
+        }
+    }
+
+    /// Runs a line typed in the console: a built-in word, or the name of an editor tool with its values.
+    fn console_run(&mut self, line: &str) {
+        use console::Level;
+        let line = line.trim();
+        if line.is_empty() {
+            return;
+        }
+        self.console.remember(line);
+        self.console.log(Level::Command, line);
+        match line.split_whitespace().next().unwrap_or("") {
+            "help" | "?" => self.console.log(Level::Result, console::HELP),
+            "clear" | "cls" => self.console.clear(),
+            "tools" => {
+                let names: Vec<String> = mcp::tool_list().iter().filter_map(|t| t.str("name").map(String::from)).collect();
+                self.console.log(Level::Result, &names.join("  "));
+            }
+            _ => match console::parse_command(line) {
+                Ok((tool, args)) => match self.mcp_tool(&tool, &args) {
+                    Ok(v) => {
+                        let s = v.to_string();
+                        let shown: String = if s.chars().count() > 2000 { s.chars().take(2000).collect::<String>() + " ..." } else { s };
+                        self.console.log(Level::Result, &shown);
+                    }
+                    Err(e) => self.console.log(Level::Error, &e),
+                },
+                Err(e) => self.console.log(Level::Error, &e),
+            },
         }
     }
 
@@ -4643,6 +4755,7 @@ impl App {
     }
 
     fn status_note(&mut self, text: &str) {
+        self.console.log(console::Level::of_note(text), text);
         self.window.set_status(text);
         self.status_t = Instant::now() + Duration::from_secs(2); // keep the note visible a moment
     }
@@ -4877,6 +4990,29 @@ Download it from the GitHub releases page to install and update."),
             win32::CMD_FRAME_SEL => self.frame_selected(),
             win32::CMD_FRAME_ALL => self.frame_all(),
             win32::CMD_AFFINE => self.view.affine = !self.view.affine,
+            win32::CMD_TOGGLE_CONSOLE => {
+                if self.window.bottom_tab() == 3 {
+                    self.window.show_bottom_tab(0);
+                } else {
+                    self.window.show_bottom_tab(3);
+                    self.console.dirty = true;
+                    self.window.focus_console();
+                }
+            }
+            win32::CMD_TAB_CONSOLE => {
+                self.console.dirty = true;
+                self.window.focus_console();
+            }
+            win32::CMD_CONSOLE_CLEAR => self.console.clear(),
+            win32::CMD_CONSOLE_RUN => {
+                let line = self.window.get_text(win32::ED_CONSOLE_IN);
+                self.window.set_text(win32::ED_CONSOLE_IN, "");
+                self.console_run(&line);
+            }
+            win32::CMD_CONSOLE_UP | win32::CMD_CONSOLE_DOWN => {
+                let text = self.console.step_history(id == win32::CMD_CONSOLE_UP).unwrap_or_default();
+                self.window.set_text(win32::ED_CONSOLE_IN, &text);
+            }
             win32::CMD_SNAP => {
                 self.snap_on = !self.snap_on;
                 self.status_note(if self.snap_on { "Snapping on (hold Ctrl to move freely)" } else { "Snapping off (hold Ctrl to snap)" });
@@ -5470,6 +5606,7 @@ Download it from the GitHub releases page to install and update."),
         w.set_text(win32::ED_STEPS, &e.steps.to_string());
         w.set_text(win32::ED_RENDER_DIST, &fmt_f(e.render_distance));
         w.set_text(win32::ED_VSNAP, &e.vertex_snap.to_string());
+        w.combo_set(win32::CB_SHADING, &["Smooth (lit at the corners)", "Flat (lit per face)"], e.flat_shading as usize);
         w.set_text(win32::ED_AMBIENT, &fmt_f(e.ambient_strength));
         for id in [win32::ED_FOG_START, win32::ED_FOG_END, win32::CMD_ENV_FOG_COLOR, win32::CMD_ENV_FOG_FROM_SKY] {
             w.set_enabled(id, e.fog != 0);
@@ -5497,7 +5634,7 @@ Download it from the GitHub releases page to install and update."),
         };
         w.set_text(
             win32::ST_ENV_INFO,
-            &format!("Fog color: {}\r\n{sky}\r\nAmbient light: {} x{} (lights everything; scene lights add to it)\r\n\r\nRange is in multiples of the scene radius. Dithered fog\r\nquantises to the given steps using blocks of px.\r\nKeys: [ ] fog distance, , . dither size.", hex(e.fog_color), hex(e.ambient), fmt_f(e.ambient_strength)),
+            &format!("Fog color: {}\r\n{sky}\r\nAmbient light: {} x{} (lights everything; scene lights add to it)\r\n\r\nRange is in multiples of the scene radius. Dithered fog\r\nquantises to the given steps using blocks of px.\r\nKeys: [ ] fog distance, , . dither size.\r\nUncheck <Environment> in the hierarchy to switch all of this off.", hex(e.fog_color), hex(e.ambient), fmt_f(e.ambient_strength)),
         );
     }
 
@@ -5527,9 +5664,9 @@ Download it from the GitHub releases page to install and update."),
         w.set_group_visible(11, light.is_some());
         let scatter = if env_selected { None } else { self.scatter_index() };
         let camera = if env_selected { None } else { self.camera_index() };
-        let object_panel = !env_selected && particles.is_none() && scatter.is_none() && player.is_none() && light.is_none() && tree.is_none();
+        let object_panel = !env_selected && particles.is_none() && scatter.is_none() && light.is_none() && tree.is_none();
         w.set_group_visible(1, object_panel);
-        w.set_group_visible(15, object_panel && camera.is_none()); // the appearance, material and collision of an object: not for a camera
+        w.set_group_visible(15, object_panel && camera.is_none() && player.is_none()); // the appearance, material and collision of an object: not for a camera or the player
         w.set_group_visible(14, camera.is_some());
         w.set_group_visible(2, env_selected);
         w.set_group_visible(4, particles.is_some());
@@ -5546,8 +5683,7 @@ Download it from the GitHub releases page to install and update."),
         }
         if let Some(j) = player {
             w.set_group_visible(3, false);
-            self.refresh_player(j);
-            return;
+            self.refresh_player(j); // (its settings sit below the name and transform that every object has)
         }
         if let Some(j) = light {
             w.set_group_visible(3, false);
@@ -6140,6 +6276,7 @@ Download it from the GitHub releases page to install and update."),
         match id {
             win32::CB_FOG => e.fog = sel.min(2) as u8,
             win32::CB_COLORBITS => e.color_bits = [4u8, 8, 16, 32][sel.min(3)],
+            win32::CB_SHADING => e.flat_shading = sel == 1,
             _ => {
                 e.sky.kind = match sel {
                     1 => SkyKind::Gradient,
@@ -6183,6 +6320,10 @@ Download it from the GitHub releases page to install and update."),
         if self.material_library() != self.mat_lib_key {
             self.explorer_refresh();
             self.details_dirty = true;
+        }
+        if self.console.dirty && self.window.bottom_tab() == 3 {
+            self.window.set_text(win32::ED_CONSOLE, &self.console.text());
+            self.console.dirty = false;
         }
         if self.dirty_t.elapsed() > Duration::from_millis(500) {
             self.dirty_t = Instant::now();
@@ -6545,18 +6686,31 @@ Download it from the GitHub releases page to install and update."),
         }
     }
 
+    /// The environment the picture is drawn with: all of its effects are off while the Environment is unchecked in the hierarchy.
+    fn render_env(&self) -> scene::Environment {
+        let on = self.ex.checked.get(self.base.nodes.len()).copied().unwrap_or(true);
+        if on { self.edits.env.clone() } else { scene::Environment::disabled() }
+    }
+
     /// Draws the sky, the model and the particle systems seen from `cam` into the current framebuffer, in the
     /// pixel rectangle (vx, vy, w, h). `offscreen` is a camera texture: no grid and no editor matrices kept.
     fn render_world(&mut self, cam: Cam, fov: f32, vx: i32, vy: i32, w: i32, h: i32, offscreen: bool) {
         let scene_r = self.scene_radius();
+        let env_r = self.render_env();
         let (g, mesh) = (&self.g, &self.mesh);
         let cam = &cam;
         let f = cam.forward();
         let target = [cam.pos[0] + f[0], cam.pos[1] + f[1], cam.pos[2] + f[2]];
-        let view = math::look_at(cam.pos, target, [0.0, 1.0, 0.0]);
-        let (near, mut far) = (scene_r * 0.005, scene_r * 300.0);
-        if self.edits.env.render_distance > 0.0 {
-            far = self.edits.env.render_distance.max(near * 10.0);
+        // the camera's right and up, turned about the way it looks by the roll of the player
+        let (fwd, right0) = (cam.forward(), cam.right());
+        let up0 = math::cross(right0, fwd);
+        let (rs, rc) = if offscreen { (0.0, 1.0) } else { self.play_roll.to_radians().sin_cos() };
+        let sky_r = add3(mul3(right0, rc), mul3(up0, rs));
+        let sky_u = add3(mul3(up0, rc), mul3(right0, -rs));
+        let view = math::look_at(cam.pos, target, sky_u);
+        let (near, mut far) = ((scene_r * 0.0005).max(0.01), scene_r * 100.0); // the near plane hugs the lens: nothing is clipped until it is almost touching
+        if env_r.render_distance > 0.0 {
+            far = env_r.render_distance.max(near * 10.0);
         }
         let proj = math::perspective(fov.to_radians(), w as f32 / h as f32, near, far);
         let mvp = math::mul(&proj, &view);
@@ -6573,7 +6727,7 @@ Download it from the GitHub releases page to install and update."),
             _ => 0,
         };
         let lights_packed = self.gather_lights();
-        let env = &self.edits.env;
+        let env = &env_r;
         let dither_px = (env.dither * win32::dpi_scale()).round().max(1.0) as i32;
         let (fog_start, fog_end) = (scene_r * env.fog_start, scene_r * env.fog_end);
         let (mut fog_mode, mut fog_color, fog_steps) = (env.fog as i32, env.fog_color, env.steps as f32);
@@ -6583,8 +6737,7 @@ Download it from the GitHub releases page to install and update."),
             (fog_mode, fog_color, fog_start, fog_end) = (1, [0.08, 0.28, 0.42], 0.3, 14.0);
         }
         let (sky_kind, sky_solid, sky_top, sky_bottom) = (env.sky.kind, env.sky.solid, env.sky.top, env.sky.bottom);
-        let (sky_f, sky_r) = (cam.forward(), cam.right());
-        let sky_u = math::cross(sky_r, sky_f);
+        let sky_f = cam.forward();
         unsafe {
             (g.glViewport)(vx, vy, w, h);
             if offscreen {
@@ -6603,7 +6756,7 @@ Download it from the GitHub releases page to install and update."),
                 (g.glUseProgram)(p);
                 let l = (g.glGetUniformLocation)(p, b"colorBits\0".as_ptr());
                 if l >= 0 {
-                    (g.glUniform1i)(l, self.edits.env.color_bits as i32);
+                    (g.glUniform1i)(l, env_r.color_bits as i32);
                 }
             }
             // sky first, behind everything
@@ -6646,7 +6799,7 @@ Download it from the GitHub releases page to install and update."),
                     (g.glUniform4fv)(self.locs.l_col, count, col.as_ptr());
                     (g.glUniform4fv)(self.locs.l_dir, count, dir.as_ptr());
                 }
-                let (a, k) = (self.edits.env.ambient, self.edits.env.ambient_strength);
+                let (a, k) = (env_r.ambient, env_r.ambient_strength);
                 (g.glUniform3f)(self.locs.ambient, a[0] * k, a[1] * k, a[2] * k);
             }
             (g.glUniform1i)(self.locs.affine, v.affine as i32);
@@ -6659,8 +6812,9 @@ Download it from the GitHub releases page to install and update."),
             // back faces are dropped by the shader (the view's setting, or a material that hides them)
             (g.glDisable)(gl::CULL_FACE);
             (g.glUniform1i)(self.locs.cull_on, v.cull as i32);
-            let sn = self.edits.env.vertex_snap as f32;
+            let sn = env_r.vertex_snap as f32;
             (g.glUniform2f)(self.locs.vsnap, sn, sn * h as f32 / w.max(1) as f32);
+            (g.glUniform1i)(self.locs.flat_shade, env_r.flat_shading as i32);
             if !wire_only {
                 (g.glUniform1i)(self.locs.mode, fill_mode);
                 if overlay {
@@ -6859,6 +7013,8 @@ fn main() {
         return mcp::run_stdio();
     }
     // a compiled game carries its data at the end of its own executable
+    // started from a terminal: print there (a program without a console would otherwise print nowhere)
+    win32::attach_parent_console();
     if let Some(game) = pak::embedded() {
         return run_game(game);
     }

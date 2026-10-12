@@ -67,6 +67,10 @@ const COMPARE_OPS: &[&str] = &["<", ">", "<=", ">=", "==", "!="];
 const LOGIC_OPS: &[&str] = &["and", "or"];
 const FUNCS: &[&str] = &["sin", "cos", "abs", "sqrt", "floor", "round", "sign"];
 const BOOLS: &[&str] = &["true", "false"];
+const ON_OFF: &[&str] = &["on", "off"];
+const POINTER_LOOKS: &[&str] = &["arrow", "hand", "cross", "text", "wait", "move", "no", "resize_h", "resize_v", "none", "auto"];
+const POINTER_STATES: &[&str] = &["free", "captured", "auto"];
+const MOUSE_MODES: &[&str] = &["look", "cursor", "toggle", "hold"];
 
 const THEN: &[PinDef] = &[exec("then")];
 const IN_THEN: &[PinDef] = &[exec("in")];
@@ -109,6 +113,16 @@ pub const DEFS: &[NodeDef] = &[
     NodeDef { id: "distance", title: "Distance Between", category: "Values", ins: &[], outs: VALUE, params: &[object("from"), object("to")], defaults: &[] },
     NodeDef { id: "random", title: "Random", category: "Values", ins: &[data("min"), data("max")], outs: VALUE, params: &[], defaults: &["0", "1"] },
     NodeDef { id: "clicked", title: "GUI Button Clicked", category: "Values", ins: &[], outs: VALUE, params: &[text("button", "Menu")], defaults: &[] },
+    // ---- the mouse
+    NodeDef { id: "mouse_lock", title: "Lock Mouse To Window", category: "Mouse", ins: IN_THEN, outs: OUT_THEN, params: &[choice("lock", ON_OFF)], defaults: &[""] },
+    NodeDef { id: "mouse_center", title: "Center Mouse", category: "Mouse", ins: IN_THEN, outs: OUT_THEN, params: &[], defaults: &[""] },
+    NodeDef { id: "mouse_set", title: "Set Mouse Position", category: "Mouse", ins: &[exec("in"), data("x"), data("y")], outs: OUT_THEN, params: &[], defaults: &["", "0", "0"] },
+    NodeDef { id: "mouse_cursor", title: "Set Pointer Look", category: "Mouse", ins: IN_THEN, outs: OUT_THEN, params: &[choice("look", POINTER_LOOKS)], defaults: &[""] },
+    NodeDef { id: "mouse_free", title: "Free / Capture Pointer", category: "Mouse", ins: IN_THEN, outs: OUT_THEN, params: &[choice("pointer", POINTER_STATES)], defaults: &[""] },
+    NodeDef { id: "mouse_mode", title: "Set Mouse Mode", category: "Mouse", ins: IN_THEN, outs: OUT_THEN, params: &[choice("mode", MOUSE_MODES)], defaults: &[""] },
+    NodeDef { id: "mouse_x", title: "Mouse X", category: "Mouse", ins: &[], outs: VALUE, params: &[], defaults: &[] },
+    NodeDef { id: "mouse_y", title: "Mouse Y", category: "Mouse", ins: &[], outs: VALUE, params: &[], defaults: &[] },
+    NodeDef { id: "mouse_down", title: "Mouse Button Is Down", category: "Mouse", ins: &[], outs: VALUE, params: &[], defaults: &[] },
     // ---- math and logic
     NodeDef { id: "math", title: "Math", category: "Math", ins: &[data("a"), data("b")], outs: VALUE, params: &[choice("op", MATH_OPS)], defaults: &["0", "0"] },
     NodeDef { id: "func", title: "Function", category: "Math", ins: &[data("a")], outs: VALUE, params: &[choice("fn", FUNCS)], defaults: &["0"] },
@@ -116,6 +130,93 @@ pub const DEFS: &[NodeDef] = &[
     NodeDef { id: "logic", title: "And / Or", category: "Logic", ins: &[data("a"), data("b")], outs: VALUE, params: &[choice("op", LOGIC_OPS)], defaults: &["true", "true"] },
     NodeDef { id: "not", title: "Not", category: "Logic", ins: &[data("a")], outs: VALUE, params: &[], defaults: &["true"] },
 ];
+
+/// What a pin carries. Wires are drawn in the colour of their type (like the sockets of Blender's nodes).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ty {
+    /// The order things happen in.
+    Exec,
+    Number,
+    Bool,
+    Text,
+    /// Takes (or gives) whatever it is given.
+    Any,
+}
+
+/// The kind of value input `pin` of a block takes.
+pub fn in_ty(kind: &str, pin: usize) -> Ty {
+    if def(kind).and_then(|d| d.ins.get(pin)).is_some_and(|p| p.kind == PinKind::Exec) {
+        return Ty::Exec;
+    }
+    match kind {
+        "if" | "gui_show" | "logic" | "not" => Ty::Bool,
+        "add_prop" | "move" | "spin" | "launch" | "gui_value" | "random" | "math" | "func" | "mouse_set" => Ty::Number,
+        _ => Ty::Any,
+    }
+}
+
+/// The kind of value output `pin` of a block gives (`params` are the block's parameters: a property can be a number or true / false).
+pub fn out_ty(kind: &str, params: &[String], pin: usize) -> Ty {
+    if def(kind).and_then(|d| d.outs.get(pin)).is_some_and(|p| p.kind == PinKind::Exec) {
+        return Ty::Exec;
+    }
+    match kind {
+        "number" | "time" | "dt" | "distance" | "random" | "math" | "func" | "mouse_x" | "mouse_y" => Ty::Number,
+        "text" => Ty::Text,
+        "bool" | "key_held" | "key_pressed" | "clicked" | "mouse_down" | "compare" | "logic" | "not" => Ty::Bool,
+        "get_prop" => if matches!(params.get(1).map(|s| s.trim()), Some("visible" | "solid")) { Ty::Bool } else { Ty::Number },
+        _ => Ty::Any,
+    }
+}
+
+/// Can a wire carry a `from` value into a `to` input? Orders only join orders, text only joins text, numbers
+/// and true / false mix (a script treats a number as true / false), and `Any` takes everything.
+pub fn ty_fits(from: Ty, to: Ty) -> bool {
+    if from == Ty::Exec || to == Ty::Exec {
+        return from == to;
+    }
+    from == to || from == Ty::Any || to == Ty::Any || (matches!(from, Ty::Number | Ty::Bool) && matches!(to, Ty::Number | Ty::Bool))
+}
+
+/// Every block with a pin that a wire pulled out of a pin of type `from` can end at, with that pin:
+/// (index into [`DEFS`], pin). A wire pulled from an output (`from_out`) needs an input; from an input, an output.
+pub fn matching_blocks(from: Ty, from_out: bool) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for (i, d) in DEFS.iter().enumerate() {
+        let params: Vec<String> = d.params.iter().map(|p| p.default.to_string()).collect();
+        let pin = if from_out {
+            (0..d.ins.len()).find(|&k| ty_fits(from, in_ty(d.id, k)))
+        } else {
+            (0..d.outs.len()).find(|&k| ty_fits(out_ty(d.id, &params, k), from))
+        };
+        if let Some(k) = pin {
+            out.push((i, k));
+        }
+    }
+    out
+}
+
+/// How well a block fits what was typed in the search box (None: not at all; lower is better).
+pub fn query_score(d: &NodeDef, query: &str) -> Option<u8> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Some(0);
+    }
+    let title = d.title.to_lowercase();
+    let hay = format!("{title} {} {}", d.category.to_lowercase(), d.id.replace('_', " "));
+    if !q.split_whitespace().all(|t| hay.contains(t)) {
+        return None;
+    }
+    Some(if title.starts_with(&q) {
+        0
+    } else if title.split_whitespace().any(|w| w.starts_with(&q)) {
+        1
+    } else if title.contains(&q) {
+        2
+    } else {
+        3
+    })
+}
 
 pub fn def(kind: &str) -> Option<&'static NodeDef> {
     DEFS.iter().find(|d| d.id == kind)
@@ -321,6 +422,16 @@ impl Graph {
             "gui_text" => format!("gui_text({}, {})", quote(p(0)), self.input(n.id, 1, 0)?),
             "gui_value" => format!("gui_value({}, {})", quote(p(0)), self.input(n.id, 1, 0)?),
             "gui_show" => format!("gui_show({}, {})", quote(p(0)), self.input(n.id, 1, 0)?),
+            "mouse_lock" => format!("mouse_lock({})", if p(0) == "off" { "false" } else { "true" }),
+            "mouse_center" => "mouse_center()".to_string(),
+            "mouse_set" => format!("mouse_set({}, {})", self.input(n.id, 1, 0)?, self.input(n.id, 2, 0)?),
+            "mouse_cursor" => format!("mouse_cursor({})", quote(p(0))),
+            "mouse_free" => match p(0) {
+                "captured" => "cursor(false)".to_string(),
+                "auto" => "cursor(\"auto\")".to_string(),
+                _ => "cursor(true)".to_string(),
+            },
+            "mouse_mode" => format!("gui_mode({})", quote(p(0))),
             _ => return Ok(None),
         }))
     }
@@ -356,6 +467,9 @@ impl Graph {
             "key_pressed" => format!("pressed({})", quote(p(0))),
             "distance" => format!("distance({}, {})", object_expr(p(0)), object_expr(p(1))),
             "clicked" => format!("clicked({})", quote(p(0))),
+            "mouse_x" => "mouse_x()".into(),
+            "mouse_y" => "mouse_y()".into(),
+            "mouse_down" => "mouse_down()".into(),
             "random" => format!("random({}, {})", inp(0)?, inp(1)?),
             "math" => match p(0) {
                 op @ ("min" | "max" | "pow") => format!("{op}({}, {})", inp(0)?, inp(1)?),
@@ -509,6 +623,66 @@ mod tests {
         assert!(code.contains("var opened = 0"), "{code}");
         assert!(code.contains("on key(\"e\") {\n    if (distance(object(\"Door\"), player) < 3) {\n        object(\"Door\").position.y = 3\n        opened = 1\n    }\n}"), "{code}");
         crate::script::check(&code).unwrap();
+    }
+
+    #[test]
+    fn mouse_blocks_compile_to_the_mouse_functions() {
+        let mut g = Graph::default();
+        let s = g.add_node("on_start", 0.0, 0.0).unwrap();
+        let lock = g.add_node("mouse_lock", 0.0, 0.0).unwrap();
+        let look = g.add_node("mouse_cursor", 0.0, 0.0).unwrap();
+        g.node_mut(look).unwrap().params = vec!["hand".into()];
+        let set = g.add_node("mouse_set", 0.0, 0.0).unwrap();
+        let mx = g.add_node("mouse_x", 0.0, 0.0).unwrap();
+        let free = g.add_node("mouse_free", 0.0, 0.0).unwrap();
+        g.node_mut(free).unwrap().params = vec!["captured".into()];
+        let mode = g.add_node("mouse_mode", 0.0, 0.0).unwrap();
+        g.node_mut(mode).unwrap().params = vec!["toggle".into()];
+        g.connect(s, 0, lock, 0);
+        g.connect(lock, 0, look, 0);
+        g.connect(look, 0, set, 0);
+        g.connect(mx, 0, set, 1);
+        g.connect(set, 0, free, 0);
+        g.connect(free, 0, mode, 0);
+        let code = g.compile().unwrap();
+        for line in ["mouse_lock(true)", "mouse_cursor(\"hand\")", "mouse_set(mouse_x(), 0)", "cursor(false)", "gui_mode(\"toggle\")"] {
+            assert!(code.contains(line), "{line} missing from\n{code}");
+        }
+        crate::script::check(&code).unwrap();
+    }
+
+    #[test]
+    fn pins_have_types_and_wires_search_for_blocks_that_fit() {
+        assert_eq!(out_ty("mouse_x", &[], 0), Ty::Number);
+        assert_eq!(out_ty("mouse_down", &[], 0), Ty::Bool);
+        assert_eq!(out_ty("text", &["hi".into()], 0), Ty::Text);
+        assert_eq!(out_ty("get_prop", &["".into(), "visible".into()], 0), Ty::Bool);
+        assert_eq!(out_ty("get_prop", &["".into(), "position.x".into()], 0), Ty::Number);
+        assert_eq!(in_ty("if", 0), Ty::Exec);
+        assert_eq!(in_ty("if", 1), Ty::Bool);
+        assert!(ty_fits(Ty::Number, Ty::Bool) && ty_fits(Ty::Any, Ty::Text) && !ty_fits(Ty::Text, Ty::Number) && !ty_fits(Ty::Exec, Ty::Any));
+        // pulling an order wire out of an output: only blocks with an order input
+        let found = matching_blocks(Ty::Exec, true);
+        assert!(found.iter().all(|&(i, k)| DEFS[i].ins[k].kind == PinKind::Exec));
+        assert!(found.iter().any(|&(i, _)| DEFS[i].id == "mouse_center") && !found.iter().any(|&(i, _)| DEFS[i].id == "number"));
+        // a number can go into Set Mouse Position (x), but a text cannot
+        let num = matching_blocks(Ty::Number, true);
+        assert!(num.iter().any(|&(i, k)| DEFS[i].id == "mouse_set" && k == 1));
+        assert!(!matching_blocks(Ty::Text, true).iter().any(|&(i, _)| DEFS[i].id == "mouse_set"));
+        // pulling from an input that wants a number: blocks that give one
+        assert!(matching_blocks(Ty::Number, false).iter().any(|&(i, _)| DEFS[i].id == "mouse_y"));
+    }
+
+    #[test]
+    fn the_search_finds_blocks_by_any_word() {
+        let d = |id: &str| def(id).unwrap();
+        assert!(query_score(d("mouse_set"), "mouse set").is_some());
+        assert!(query_score(d("mouse_set"), "mouse pos").is_some());
+        assert!(query_score(d("mouse_set"), "sound").is_none());
+        assert!(query_score(d("sound"), "SOUND").is_some());
+        assert!(query_score(d("sound"), "actions").is_some(), "the category counts");
+        assert!(query_score(d("print"), "pri") < query_score(d("print"), "int"), "a word that starts with it beats one that merely contains it");
+        assert_eq!(query_score(d("print"), ""), Some(0));
     }
 
     #[test]

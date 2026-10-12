@@ -28,3 +28,10 @@ Suggested flow: get_info -> get_scene -> add_object / set_script (read get_guide
   back to what Blender has.
 * `assign_material` (or `material` on `add_object` / `modify_object`) gives an object a material.
 * `set_game_camera` chooses the scene camera. Camera objects have no colour, material or collision.
+
+## More tools
+
+* `set_environment`: also `shading` (smooth | flat) and `vertex_snap` (the PS1 wobble, in pixels). `apply_environment_preset` sets a whole look (classic | night | day | clean).
+* `drop_to_ground`, `set_view` (front | back | right | left | top | bottom), `open_script` (opens an object's script tab).
+* `get_console` reads the editor's console log (script `print` output, errors, commands).
+* Unchecking `<Environment>` in the hierarchy switches all of its effects off.

@@ -1,6 +1,10 @@
 //! .blend support: runs Blender headless with `export_blend.py` and returns the exported files.
 use std::path::{Path, PathBuf};
+use std::os::windows::process::CommandExt;
 use std::process::Command;
+
+/// Blender is a console program: without this flag every export would open a terminal window of its own.
+const NO_WINDOW: u32 = 0x0800_0000;
 
 const SCRIPT: &str = include_str!("export_blend.py");
 
@@ -48,6 +52,7 @@ pub fn export(blend: &str) -> Result<Exported, String> {
     println!("exporting {blend} with {} ...", blender.display());
     let foreign = !blend.to_lowercase().ends_with(".blend");
     let mut cmd = Command::new(&blender);
+    cmd.creation_flags(NO_WINDOW);
     cmd.args(["--factory-startup", "--background"]);
     if foreign {
         cmd.env("GPR_IMPORT", blend); // the script imports it into the empty startup scene
@@ -90,6 +95,7 @@ pub fn convert_image(src: &str) -> Result<String, String> {
     let script = dir.join("convert_image.py");
     std::fs::write(&script, CONVERT_SCRIPT).map_err(|e| e.to_string())?;
     let out = Command::new(&blender)
+        .creation_flags(NO_WINDOW)
         .args(["--factory-startup", "--background", "--python"])
         .arg(&script)
         .arg("--")

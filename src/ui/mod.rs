@@ -177,7 +177,7 @@ pub enum Region {
 pub fn region_of(group: u8) -> Region {
     match group {
         9 => Region::Toolbar,
-        7 | 8 | 10 => Region::Bottom,
+        7 | 8 | 10 | 16 => Region::Bottom,
         _ => Region::Inspector,
     }
 }
@@ -199,7 +199,7 @@ pub struct Ui {
     active: Active,
     insp_scroll: VScroll,
     bottom_tab: u8,
-    group_visible: [bool; 16],
+    group_visible: [bool; 24],
     pub status: String,
     layout: Layout,
     cursor: Cursor,
@@ -241,8 +241,8 @@ pub enum ScriptEvent {
 
 impl Ui {
     pub fn new(scale: f32) -> Ui {
-        let mut groups = [false; 16];
-        for g in [0, 1, 7, 8, 9, 10, 15] {
+        let mut groups = [false; 24];
+        for g in [0, 1, 7, 8, 9, 10, 15, 16] {
             groups[g] = true;
         }
         Ui {
@@ -331,6 +331,7 @@ impl Ui {
             8 => self.bottom_tab == 0,
             7 => self.bottom_tab == 1,
             10 => self.bottom_tab == 2,
+            16 => self.bottom_tab == 3,
             _ => true,
         }
     }
@@ -362,9 +363,17 @@ impl Ui {
             Region::Bottom => {
                 let b = l.bottom();
                 let x = p(w.x);
+                // a negative y is measured from the bottom of the area, a negative height leaves that much room below
+                let y = if w.y < 0 { b[3] + p(w.y) } else { p(w.y) };
                 let rw = if w.w == 0 { (b[2] - x - p(4)).max(1.0) } else { p(w.w) };
-                let rh = if w.h == 0 { (b[3] - p(w.y) - p(4)).max(1.0) } else { p(w.h) };
-                [x, b[1] + p(w.y), rw, rh]
+                let rh = if w.h == 0 {
+                    (b[3] - y - p(4)).max(1.0)
+                } else if w.h < 0 {
+                    (b[3] - y - p(-w.h)).max(1.0)
+                } else {
+                    p(w.h)
+                };
+                [x, b[1] + y, rw, rh]
             }
         })
     }
@@ -466,7 +475,7 @@ impl Ui {
     }
 
     pub fn show_bottom_tab(&mut self, t: u8) {
-        self.bottom_tab = t.min(2);
+        self.bottom_tab = t.min(3);
         if let Focus::Field(i) = self.focus {
             if !self.widgets.get(i).is_some_and(|w| self.widget_visible(w)) {
                 self.focus = Focus::None;
@@ -840,7 +849,7 @@ impl Ui {
         let t = l.tab_strip();
         c.r.fill(t[0], t[1], t[2], t[3], c_bar());
         c.r.fill(t[0], t[1] + t[3] - 1.0, t[2], 1.0, c_border_soft());
-        for (i, title) in ["PROJECT", "SCRIPT", "GUIDE"].iter().enumerate() {
+        for (i, title) in ["PROJECT", "SCRIPT", "GUIDE", "CONSOLE"].iter().enumerate() {
             if i == 1 {
                 continue; // scripts have their own tabs above the scene now
             }
@@ -869,7 +878,11 @@ impl Ui {
     pub fn tab_rect(&self, i: usize) -> Rect {
         let t = self.layout.tab_strip();
         let s = self.scale;
-        let slot = if i == 2 { 1 } else { i };
+        let slot = match i {
+            2 => 1,
+            3 => 2,
+            _ => i,
+        };
         [(8.0 * s + slot as f32 * 100.0 * s).round(), t[1] + (2.0 * s).round(), (96.0 * s).round(), t[3] - (3.0 * s).round()]
     }
 

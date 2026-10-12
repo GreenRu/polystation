@@ -253,6 +253,9 @@ pub fn to_text(dir: &Path, st: &ProjectState) -> String {
         }
     }
     out += &format!("colorbits {}\n", st.edits.env.color_bits);
+    if st.edits.env.flat_shading {
+        out += "flat 1\n";
+    }
     if st.edits.env.vertex_snap > 0 {
         out += &format!("vsnap {}\n", st.edits.env.vertex_snap);
     }
@@ -573,6 +576,7 @@ pub fn from_text(text: &str, dir: &Path) -> Result<ProjectState, String> {
             "model" => st.model = from_stored(rest, &dir),
             "atlas" => st.atlas = Some(from_stored(rest, &dir)),
             "gamecamera" => st.edits.game_camera = Some(rest.to_string()),
+            "flat" => st.edits.env.flat_shading = rest.trim() == "1",
             "vsnap" => st.edits.env.vertex_snap = rest.parse::<u32>().unwrap_or(0).min(2048),
             "colorbits" => st.edits.env.color_bits = rest.parse().ok().filter(|b| [4u8, 8, 16, 32].contains(b)).unwrap_or(32),
             "guimode" => st.edits.gui_mode = crate::gui::Mode::from_index(rest.parse().unwrap_or(2)),
@@ -774,6 +778,7 @@ mod tests {
         });
         edits.env.ambient = [0.1, 0.2, 0.3];
         edits.env.vertex_snap = 240;
+        edits.env.flat_shading = true;
         edits.extras.push(Extra {
             light: LightParams { kind: LightKind::Spot, intensity: 2.5, range: 30.0, angle: 70.0 },
             tree: Default::default(),

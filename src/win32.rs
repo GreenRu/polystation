@@ -330,6 +330,17 @@ pub const CMD_SNAP: u16 = 1260;
 pub const CMD_DROP: u16 = 1261;
 pub const CMD_SHORTCUTS: u16 = 1262;
 pub const CMD_PAUSE: u16 = 1263;
+/// The console: its tab was clicked, open / close it (menu, `), run the command line, clear the log, history up / down.
+pub const CMD_TAB_CONSOLE: u16 = 1264;
+pub const CMD_TOGGLE_CONSOLE: u16 = 1265;
+pub const CMD_CONSOLE_RUN: u16 = 1266;
+pub const CMD_CONSOLE_CLEAR: u16 = 1267;
+pub const CMD_CONSOLE_UP: u16 = 1268;
+pub const CMD_CONSOLE_DOWN: u16 = 1269;
+pub const ED_CONSOLE: u16 = 3173;
+pub const ED_CONSOLE_IN: u16 = 3174;
+pub const ST_CONSOLE_HINT: u16 = 3175;
+pub const CB_SHADING: u16 = 3036;
 /// Standard views: front, back, right, left, top, bottom.
 pub const CMD_VIEW_BASE: u16 = 1270;
 /// Environment presets: Classic PS1, Night, Day, Clean.
@@ -683,6 +694,40 @@ unsafe extern "system" fn main_proc(h: HWND, m: u32, w: usize, l: isize) -> isiz
     0
 }
 
+/// Shows a start-up error in a message box (the program has no terminal to print it in).
+pub fn fatal(text: &str) {
+    unsafe { MessageBoxW(0, wide(text).as_ptr(), wide("Polystation").as_ptr(), 0x10) };
+}
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn AttachConsole(pid: u32) -> i32;
+    fn GetStdHandle(n: u32) -> isize;
+    fn SetStdHandle(n: u32, h: isize) -> i32;
+    fn CreateFileW(name: *const u16, access: u32, share: u32, sa: *const c_void, disp: u32, flags: u32, template: isize) -> isize;
+}
+
+/// When Polystation is started from a terminal, its messages (println!) go to that terminal, as before. Started from
+/// the Start menu, a shortcut or Explorer there is no terminal and nothing opens. Output that was redirected to a file
+/// or a pipe stays where it was sent.
+pub fn attach_parent_console() {
+    unsafe {
+        if AttachConsole(0xFFFF_FFFF) == 0 {
+            return;
+        }
+        for std in [0xFFFF_FFF5u32, 0xFFFF_FFF4] {
+            // STD_OUTPUT_HANDLE and STD_ERROR_HANDLE; only the ones nobody redirected
+            let h = GetStdHandle(std);
+            if h == 0 || h == -1 {
+                let f = CreateFileW(wide("CONOUT$").as_ptr(), 0xC000_0000, 3, std::ptr::null(), 3, 0, 0);
+                if f != -1 {
+                    SetStdHandle(std, f);
+                }
+            }
+        }
+    }
+}
+
 /// Sets the interface size (percent, 0 = follow Windows) used by the next window that opens.
 pub fn set_scale_override(percent: u32) {
     SCALE_OVERRIDE.set(percent);
@@ -819,6 +864,7 @@ impl Window {
                 (CMD_FRAME_SEL, "Frame &Selected\tF"),
                 (CMD_FRAME_ALL, "Frame A&ll\tShift+F"),
                 (CMD_SELECT_ENV, "&Environment Settings..."),
+                (CMD_TOGGLE_CONSOLE, "&Console\t`"),
                 (CMD_GUI_EDITOR, "Game &GUI Editor..."),
                 (CMD_RESET_CAMERA, "&Reset Camera"),
             ]);
@@ -852,8 +898,12 @@ impl Window {
                     wd.accent = id == CMD_PLAY;
                 }
                 if kind == Kind::Edit {
-                    let multi = id == ED_SCRIPT || id == ED_GUIDE;
-                    let mut f = Field::new(multi, id == ED_GUIDE);
+                    let multi = id == ED_SCRIPT || id == ED_GUIDE || id == ED_CONSOLE;
+                    let mut f = Field::new(multi, id == ED_GUIDE || id == ED_CONSOLE);
+                    if id == ED_CONSOLE {
+                        f.highlight = Highlight::Console;
+                        f.follow = true;
+                    }
                     if id == ED_SCRIPT {
                         f.highlight = Highlight::Script;
                         f.gutter = true;
@@ -885,6 +935,12 @@ impl Window {
             // the written guide (third tab of the bottom area): read-only text
             group.set(10);
             ctl("EDIT", "", 0x4 | 0x40 | 0x800 | 0x0020_0000 | 0x0001_0000, ED_GUIDE, 0, 4, 0, 0);
+            // the console (fourth tab): a clear button, the log, and the command line at the bottom
+            group.set(16);
+            ctl("BUTTON", "Clear", BTN, CMD_CONSOLE_CLEAR, 4, 2, 70, 22);
+            ctl("STATIC", "type help for the commands", 0, ST_CONSOLE_HINT, 84, 6, 0, 18);
+            ctl("EDIT", "", 0x4 | 0x40 | 0x800 | 0x0020_0000 | 0x0001_0000, ED_CONSOLE, 4, 28, 0, -34);
+            ctl("EDIT", "", EDIT, ED_CONSOLE_IN, 4, -30, 0, 26);
             group.set(1);
             ctl("STATIC", "Name", 0, 0, 8, 10, 44, 18);
             ctl("EDIT", "", EDIT, ED_NAME, 58, 6, 236, 22);
@@ -1041,7 +1097,7 @@ impl Window {
 
             // Player settings (shown instead of the object details for a player)
             group.set(6);
-            dy.set(0);
+            dy.set(298); // below the name and transform that every object has
             ctl("STATIC", "PLAYER", 0, ST_SECTION, 8, 8, 288, 16);
             ctl("STATIC", "", 0, ST_PLSOUND, 8, 30, 288, 18);
             ctl("BUTTON", "Step sound...", BTN, CMD_PLAYER_SOUND, 8, 52, 94, 24);
@@ -1186,11 +1242,13 @@ impl Window {
             ctl("STATIC", "Vertex snap", 0, 0, 8, 328, 86, 18);
             ctl("EDIT", "", EDIT, ED_VSNAP, 98, 324, 68, 22);
             ctl("STATIC", "px wide, 0 = off", 0, 0, 172, 328, 124, 18);
-            ctl("STATIC", "Presets", 0, 0, 8, 364, 62, 18);
+            ctl("STATIC", "Shading", 0, 0, 8, 364, 78, 18);
+            ctl("COMBOBOX", "", COMBO, CB_SHADING, 88, 360, 206, 150);
+            ctl("STATIC", "Presets", 0, 0, 8, 402, 62, 18);
             for (i, name) in ["Classic", "Night", "Day", "Clean"].into_iter().enumerate() {
-                ctl("BUTTON", name, BTN, CMD_PRESET_BASE + i as u16, 8 + i as i32 * 73, 386, 68, 24);
+                ctl("BUTTON", name, BTN, CMD_PRESET_BASE + i as u16, 8 + i as i32 * 73, 424, 68, 24);
             }
-            ctl("STATIC", "", 0, ST_ENV_INFO, 8, 426, 288, 130);
+            ctl("STATIC", "", 0, ST_ENV_INFO, 8, 464, 288, 150);
 
             let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
             GetClientRect(main, &mut r);
@@ -1455,6 +1513,7 @@ impl Window {
             (0x41, true, _, _) => Some(CMD_SELECT_ALL),
             (0x70, _, _, _) => Some(CMD_SHORTCUTS),
             _ if text => None,
+            (0xC0, false, false, false) => Some(CMD_TOGGLE_CONSOLE),
             (0x47, false, false, false) => Some(CMD_SNAP),
             (0x23, false, _, _) => Some(CMD_DROP),
             (0x61, _, _, _) => Some(CMD_VIEW_BASE + ctrl as u16),
@@ -1616,6 +1675,11 @@ impl Window {
 
     pub fn bottom_tab(&self) -> u8 {
         self.ui.borrow().bottom_tab()
+    }
+
+    /// Puts the keyboard in the console's command line.
+    pub fn focus_console(&self) {
+        self.ui.borrow_mut().focus_field(ED_CONSOLE_IN);
     }
 
     pub fn focus_script(&self) {

@@ -31,6 +31,8 @@ pub enum Highlight {
     None,
     Script,
     Guide,
+    /// The console log: the three letters after the time give the colour of the line.
+    Console,
 }
 
 pub struct Field {
@@ -44,11 +46,14 @@ pub struct Field {
     pub selecting: bool,
     pub blink: Instant,
     last_click: Option<(Instant, usize)>,
+    /// Stay at the end of the text while it grows (a log), unless the user scrolled up.
+    pub follow: bool,
+    pinned: bool,
 }
 
 impl Field {
     pub fn new(multi: bool, readonly: bool) -> Field {
-        Field { edit: Edit::new("", multi), multi, readonly, highlight: Highlight::None, gutter: false, scroll: VScroll::default(), scroll_x: 0.0, selecting: false, blink: Instant::now(), last_click: None }
+        Field { edit: Edit::new("", multi), multi, readonly, highlight: Highlight::None, gutter: false, scroll: VScroll::default(), scroll_x: 0.0, selecting: false, blink: Instant::now(), last_click: None, follow: false, pinned: true }
     }
 
     fn line_h(&self, font: &Font) -> f32 {
@@ -233,6 +238,10 @@ impl Field {
         c.field_frame(rect, focused, enabled, bg);
         let (ox, oy) = self.origin(rect, font, s);
         let lh = self.line_h(font);
+        if self.multi && self.follow && self.pinned {
+            let (_, ch) = self.content_size(font, s);
+            self.scroll.offset = (ch - h).max(0.0);
+        }
         c.r.push_clip(x + 2.0, y + 2.0, w - 4.0, h - 4.0);
         let sel = self.edit.selection();
         let blink_on = focused && !self.readonly && (self.blink.elapsed().as_millis() % 1060) < 640;
@@ -274,6 +283,29 @@ impl Field {
                     let heading = !text.is_empty() && text.chars().any(|ch| ch.is_ascii_uppercase()) && !text.chars().any(|ch| ch.is_ascii_lowercase()) && !text.starts_with(' ');
                     c.r.text(font, &text, tx, ly, if heading { c_section() } else { text_color });
                 }
+                Highlight::Console => {
+                    // "  12.3 INF text": the time is dim, the tag and the text take the colour of the level
+                    let tag: String = chars.iter().skip(7).take(3).collect();
+                    match crate::console::Level::from_tag(&tag) {
+                        Some(level) if chars.len() >= crate::console::TEXT_COL => {
+                            let color = match level {
+                                crate::console::Level::Error => rgb(0xf47067),
+                                crate::console::Level::Warn => rgb(0xe5c07b),
+                                crate::console::Level::Script => rgb(0x9cdcfe),
+                                crate::console::Level::Command => rgb(0x7fb4ff),
+                                crate::console::Level::Result => rgb(0x98c379),
+                                crate::console::Level::Info => text_color,
+                            };
+                            let head: String = chars[..7].iter().collect();
+                            let rest: String = chars[7..].iter().collect();
+                            let w0 = c.r.text(font, &head, tx, ly, c_dim());
+                            c.r.text(font, &rest, tx + w0, ly, color);
+                        }
+                        _ => {
+                            c.r.text(font, &text, tx, ly, text_color);
+                        }
+                    }
+                }
                 Highlight::None => {
                     c.r.text(font, &text, tx, ly, text_color);
                 }
@@ -301,6 +333,9 @@ impl Field {
         if self.multi {
             let (cw, ch) = self.content_size(font, s);
             self.scroll.clamp(ch, h);
+            if self.follow {
+                self.pinned = self.scroll.offset >= (ch - h).max(0.0) - 2.0; // scrolled up: stop following
+            }
             let track = [x + w - 12.0 * s, y, 12.0 * s, h];
             if let Some(t) = self.scroll.thumb(track, ch, h) {
                 c.scrollbar(t, self.scroll.dragging());

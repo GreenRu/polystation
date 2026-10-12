@@ -3,7 +3,7 @@ use super::popup::Outcome;
 use super::tree::Hit;
 use super::widgets::{Clipboard, Kind};
 use super::*;
-use crate::win32::{CMD_TAB_GUIDE, CMD_TAB_PROJECT, CMD_TAB_SCRIPT};
+use crate::win32::{CMD_CONSOLE_DOWN, CMD_CONSOLE_RUN, CMD_CONSOLE_UP, CMD_TAB_CONSOLE, CMD_TAB_GUIDE, CMD_TAB_PROJECT, CMD_TAB_SCRIPT, ED_CONSOLE_IN};
 
 /// The system clipboard.
 struct SysClipboard;
@@ -585,11 +585,12 @@ impl Ui {
             }
         }
         // bottom tabs
-        for i in 0..3 {
+        for i in [0usize, 2, 3] {
+            // (tab 1, the old script editor, has no tab of its own any more)
             if inside(p, self.tab_rect(i)) {
                 if self.bottom_tab as usize != i {
                     self.show_bottom_tab(i as u8);
-                    self.commands.push([CMD_TAB_PROJECT, CMD_TAB_SCRIPT, CMD_TAB_GUIDE][i]);
+                    self.commands.push([CMD_TAB_PROJECT, CMD_TAB_SCRIPT, CMD_TAB_GUIDE, CMD_TAB_CONSOLE][i]);
                 }
                 return Route::Ui;
             }
@@ -817,6 +818,19 @@ impl Ui {
                     return true;
                 }
                 let multi = self.widgets[i].field.as_ref().is_some_and(|f| f.multi);
+                if self.widgets[i].id == ED_CONSOLE_IN {
+                    // the console's command line: Enter runs it, Up / Down bring back earlier commands
+                    let cmd = match vk {
+                        0x0D => Some(CMD_CONSOLE_RUN),
+                        0x26 => Some(CMD_CONSOLE_UP),
+                        0x28 => Some(CMD_CONSOLE_DOWN),
+                        _ => None,
+                    };
+                    if let Some(c) = cmd {
+                        self.commands.push(c);
+                        return true;
+                    }
+                }
                 if !multi && vk == 0x09 {
                     self.tab_to(i, if mods.shift { -1 } else { 1 });
                     return true;

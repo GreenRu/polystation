@@ -490,14 +490,21 @@ impl App {
             self.shot_waiters.push(reply);
             return;
         }
-        let r = match self.mcp_tool(&tool, &args) {
+        let result = self.mcp_tool(&tool, &args);
+        if !matches!(tool.as_str(), "get_console" | "get_info") {
+            match &result {
+                Ok(_) => self.console.log(crate::console::Level::Info, &format!("MCP: {tool}")),
+                Err(e) => self.console.log(crate::console::Level::Error, &format!("MCP: {tool} failed: {e}")),
+            }
+        }
+        let r = match result {
             Ok(v) => ok(v),
             Err(e) => err(&e),
         };
         let _ = reply.send(r);
     }
 
-    fn mcp_tool(&mut self, tool: &str, args: &J) -> Result<J, String> {
+    pub fn mcp_tool(&mut self, tool: &str, args: &J) -> Result<J, String> {
         let nb = self.base.nodes.len();
         match tool {
             "get_info" => {
@@ -671,6 +678,22 @@ impl App {
                 self.assign_material(&[i], (!mat.is_empty()).then(|| mat.to_string()));
                 Ok(self.describe(i))
             }
+            "get_console" => {
+                let n = args.num("lines").unwrap_or(50.0).clamp(1.0, 500.0) as usize;
+                let lines: Vec<J> = self.console.tail(n).into_iter().map(|(t, l, text)| J::obj().with("time", t).with("level", l.tag().trim()).with("text", text)).collect();
+                Ok(J::obj().with("lines", lines))
+            }
+            "open_script" => {
+                let name = args.str("object").ok_or("object is required")?.to_string();
+                self.find_object(&name).ok_or_else(|| format!("no object named \"{name}\""))?;
+                if !self.edits.scripts.contains_key(&name) {
+                    self.require_editing()?;
+                    self.push_undo();
+                    self.edits.scripts.insert(name.clone(), crate::SCRIPT_TEMPLATE.to_string());
+                }
+                self.open_script_tab(&name);
+                Ok(J::obj().with("opened", name))
+            }
             "drop_to_ground" => {
                 self.require_editing()?;
                 if let Some(n) = args.str("name") {
@@ -819,6 +842,13 @@ impl App {
                 }
                 if args.get("ambient").is_some() {
                     e.ambient = parse_color(args, "ambient").ok_or("bad ambient")?;
+                }
+                if let Some(sh) = args.str("shading") {
+                    e.flat_shading = match sh.to_ascii_lowercase().as_str() {
+                        "flat" => true,
+                        "smooth" => false,
+                        _ => return Err("shading must be smooth or flat".into()),
+                    };
                 }
                 if let Some(v) = args.num("vertex_snap") {
                     e.vertex_snap = (v.max(0.0) as u32).min(2048);
@@ -1004,6 +1034,8 @@ pub fn tool_list() -> Vec<J> {
         tool("create_material", "Makes a new material (shown in the file explorer). Pass any of the settings, or copy_from to start from another material.", &material_props("name", "name of the new material"), &[]),
         tool("delete_material", "Deletes a material made with create_material; objects that used it have no material again.", &[("name", "string", "material to delete")], &["name"]),
         tool("assign_material", "Gives an object a material (empty material = none). Cameras cannot have materials.", &[("object", "string", "object name"), ("material", "string", "material name, or an empty string for none")], &["object", "material"]),
+        tool("get_console", "The newest lines of the editor's console: what the editor and the scripts said (print), errors, and the commands that were run.", &[("lines", "number", "how many lines (default 50, at most 500)")], &[]),
+        tool("open_script", "Opens an object's script in its own tab in the editor (adds an empty script when it has none).", &[("object", "string", "object name")], &["object"]),
         tool("drop_to_ground", "Lets an object (or the selection) fall straight down until it rests on the surface below it.", &[("name", "string", "object to drop (default: the selection)")], &[]),
         tool("set_view", "Moves the editor camera to a standard view of the selection (or the scene).", &[("name", "string", "front | back | right | left | top | bottom")], &["name"]),
         tool("apply_environment_preset", "Sets fog, sky, ambient light, colour depth and vertex snapping to a ready-made look.", &[("name", "string", "classic | night | day | clean")], &["name"]),
@@ -1028,7 +1060,7 @@ pub fn tool_list() -> Vec<J> {
         tool(
             "set_environment",
             "Sets fog, sky and ambient light.",
-            &[("fog", "string", "off | smooth | dithered"), ("fog_color", "color", "[r,g,b] or \"#rrggbb\""), ("sky_color", "color", "solid sky color"), ("ambient", "color", "ambient light color"), ("ambient_strength", "number", "ambient multiplier, 0 - 8 (1 = as is)"), ("color_bits", "number", "colour depth: 4, 8, 16 or 32 bits"), ("vertex_snap", "number", "PS1 vertex wobble: vertices snap to a grid this many pixels wide (0 = off, 320 is typical)"), ("fog_start", "number", "in scene radii"), ("fog_end", "number", "in scene radii")],
+            &[("fog", "string", "off | smooth | dithered"), ("fog_color", "color", "[r,g,b] or \"#rrggbb\""), ("sky_color", "color", "solid sky color"), ("ambient", "color", "ambient light color"), ("ambient_strength", "number", "ambient multiplier, 0 - 8 (1 = as is)"), ("color_bits", "number", "colour depth: 4, 8, 16 or 32 bits"), ("shading", "string", "smooth (lit at the corners of each face) | flat (every face lit as a whole)"), ("vertex_snap", "number", "PS1 vertex wobble: vertices snap to a grid this many pixels wide (0 = off, 320 is typical)"), ("fog_start", "number", "in scene radii"), ("fog_end", "number", "in scene radii")],
             &[],
         ),
         tool(

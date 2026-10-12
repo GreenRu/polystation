@@ -293,6 +293,16 @@ pub struct Environment {
     pub color_bits: u8,
     /// Vertices snap to a grid this many pixels wide (the PS1 wobble); 0 = off.
     pub vertex_snap: u32,
+    /// Every face is lit as a whole (faceted) instead of blending the light between its corners.
+    pub flat_shading: bool,
+}
+
+impl Environment {
+    /// What is drawn while the Environment is unchecked in the hierarchy: no fog, no sky colours, no colour
+    /// reduction, no vertex snapping, plain smooth lighting; only the default sky and ambient light remain.
+    pub fn disabled() -> Environment {
+        Environment { fog: 0, color_bits: 32, vertex_snap: 0, flat_shading: false, render_distance: 0.0, ..Environment::default() }
+    }
 }
 
 pub const BACKGROUND: [f32; 3] = [0.08, 0.09, 0.125];
@@ -311,6 +321,7 @@ impl Default for Environment {
             ambient_strength: 1.0,
             color_bits: 32,
             vertex_snap: 0,
+            flat_shading: false,
             sky: Sky { kind: SkyKind::Solid, solid: BACKGROUND, top: [0.12, 0.2, 0.42], bottom: [0.55, 0.62, 0.75], texture: None },
         }
     }
